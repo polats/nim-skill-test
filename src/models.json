@@ -1,0 +1,149 @@
+[
+  {
+    "id": "meta/llama-3.1-70b-instruct",
+    "provider": "meta",
+    "total_params_b": 70.0,
+    "active_params_b": 70.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "meta/llama-3.3-70b-instruct",
+    "provider": "meta",
+    "total_params_b": 70.0,
+    "active_params_b": 70.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "meta/llama-3.1-405b-instruct",
+    "provider": "meta",
+    "total_params_b": 405.0,
+    "active_params_b": 405.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "meta/llama-4-maverick-17b-128e-instruct",
+    "provider": "meta",
+    "total_params_b": 17.0,
+    "active_params_b": 17.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "mistralai/mistral-small-24b-instruct",
+    "provider": "mistralai",
+    "total_params_b": 24.0,
+    "active_params_b": 24.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "mistralai/mistral-small-3.1-24b-instruct-2503",
+    "provider": "mistralai",
+    "total_params_b": 24.0,
+    "active_params_b": 24.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "mistralai/mixtral-8x22b-instruct-v0.1",
+    "provider": "mistralai",
+    "total_params_b": 22.0,
+    "active_params_b": 22.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "mistralai/mistral-large-3-675b-instruct-2512",
+    "provider": "mistralai",
+    "total_params_b": 675.0,
+    "active_params_b": 675.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "mistralai/devstral-2-123b-instruct-2512",
+    "provider": "mistralai",
+    "total_params_b": 123.0,
+    "active_params_b": 123.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "qwen/qwq-32b",
+    "provider": "qwen",
+    "total_params_b": 32.0,
+    "active_params_b": 32.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "qwen/qwen3.5-397b-a17b",
+    "provider": "qwen",
+    "total_params_b": 397.0,
+    "active_params_b": 17.0,
+    "architecture": "MoE"
+  },
+  {
+    "id": "google/gemma-3-27b-it",
+    "provider": "google",
+    "total_params_b": 27.0,
+    "active_params_b": 27.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "google/gemma-3-12b-it",
+    "provider": "google",
+    "total_params_b": 12.0,
+    "active_params_b": 12.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "nvidia/llama-3.3-nemotron-super-49b-v1",
+    "provider": "nvidia",
+    "total_params_b": 49.0,
+    "active_params_b": 49.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+    "provider": "nvidia",
+    "total_params_b": 49.0,
+    "active_params_b": 49.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "deepseek-ai/deepseek-v3.2",
+    "provider": "deepseek-ai",
+    "total_params_b": 685.4,
+    "active_params_b": 685.4,
+    "architecture": "Dense"
+  },
+  {
+    "id": "moonshotai/kimi-k2-instruct",
+    "provider": "moonshotai",
+    "total_params_b": 1026.5,
+    "active_params_b": 1026.5,
+    "architecture": "Dense"
+  },
+  {
+    "id": "moonshotai/kimi-k2-instruct-0905",
+    "provider": "moonshotai",
+    "total_params_b": 1026.5,
+    "active_params_b": 1026.5,
+    "architecture": "Dense"
+  },
+  {
+    "id": "abacusai/dracarys-llama-3.1-70b-instruct",
+    "provider": "abacusai",
+    "total_params_b": 70.0,
+    "active_params_b": 70.0,
+    "architecture": "Dense"
+  },
+  {
+    "id": "minimaxai/minimax-m2.5",
+    "provider": "minimaxai",
+    "total_params_b": 228.7,
+    "active_params_b": 228.7,
+    "architecture": "Dense"
+  },
+  {
+    "id": "mistralai/ministral-14b-instruct-2512",
+    "provider": "mistralai",
+    "total_params_b": 14.0,
+    "active_params_b": 14.0,
+    "architecture": "Dense"
+  }
+]
