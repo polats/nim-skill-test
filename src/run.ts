@@ -476,10 +476,35 @@ async function launchAllModels(concurrency = 5): Promise<string> {
     }
     finishRun(runId);
     const passed = rp.passed;
+    const failed = rp.failed;
     activeRuns.delete(runId);
     emit("run-complete", { runId });
     emitProgress();
     console.log(`  Run ${runId} finished. ${passed}/${modelCount} passed.`);
+
+    // Machine-readable summary (grep-friendly, like autoresearch's val_bpb)
+    console.log(`---`);
+    console.log(`pass_rate:    ${passed}/${modelCount}`);
+    console.log(`pass_count:   ${passed}`);
+    console.log(`fail_count:   ${failed}`);
+    console.log(`total_models: ${modelCount}`);
+    console.log(`run_id:       ${runId}`);
+    const elapsed = Math.round((Date.now() - now) / 1000);
+    console.log(`elapsed_sec:  ${elapsed}`);
+
+    // List which models passed/failed
+    for (const [, a] of agents) {
+      if (a.runId !== runId) continue;
+      const s = a.status === "done" || a.status === "connected" ? "pass" : "fail";
+      console.log(`model_result: ${s} ${a.model}`);
+    }
+
+    if (AUTO_ALL) {
+      // In --all mode, exit after the run so the outer loop can evaluate
+      console.log(`\nExiting (--all mode).`);
+      setTimeout(() => process.exit(0), 1000);
+      return;
+    }
 
     if (loopMode && !rp.cancelled) {
       console.log(`  Loop mode: starting next run...`);
