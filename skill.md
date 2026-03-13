@@ -11,10 +11,33 @@ IMPORTANT: Each bash tool call runs in a fresh shell. Variables do NOT persist b
 Run this FIRST before anything else. It creates python scripts used in later steps.
 
 ```bash
-printf 'import re\nhtml = open("/tmp/signup.html").read()\nm = re.search("authenticity_token[^>]*value=.([^\"]+).", html)\nt = m.group(1) if m else "NOTFOUND"\nopen("/tmp/gl_csrf.txt", "w").write(t)\nprint(t[:20] + "...")\n' > /tmp/extract_csrf.py
-printf 'import re\nhtml = open("/tmp/pat_page.html").read()\nm = re.search("csrf-token[^>]*content=.([^\"]+).", html)\nprint(m.group(1) if m else "NOTFOUND")\n' > /tmp/extract_pat_csrf.py
-printf 'import json, urllib.request\nsig = open("/tmp/challenge.txt.sig").read()\nch = open("/tmp/gl_challenge.txt").read().strip()\nhost = open("/tmp/gl_host.txt").read().strip()\nuser = open("/tmp/gl_user.txt").read().strip()\npayload = json.dumps({"provider": host, "username": user, "challenge": ch, "signature": sig}).encode()\nreq = urllib.request.Request("http://localhost:2567/auth/verify", data=payload, headers={"Content-Type": "application/json"})\nprint(urllib.request.urlopen(req).read().decode())\n' > /tmp/do_auth.py
-echo "Scripts created"
+python3 -c "
+s1 = '''import re
+html = open('/tmp/signup.html').read()
+m = re.search(r'authenticity_token[^>]*value=\"([^\"]+)\"', html)
+t = m.group(1) if m else 'NOTFOUND'
+open('/tmp/gl_csrf.txt', 'w').write(t)
+print(t[:20] + '...')
+'''
+s2 = '''import re
+html = open('/tmp/pat_page.html').read()
+m = re.search(r'csrf-token[^>]*content=\"([^\"]+)\"', html)
+print(m.group(1) if m else 'NOTFOUND')
+'''
+s3 = '''import json, urllib.request
+sig = open('/tmp/challenge.txt.sig').read()
+ch = open('/tmp/gl_challenge.txt').read().strip()
+host = open('/tmp/gl_host.txt').read().strip()
+user = open('/tmp/gl_user.txt').read().strip()
+payload = json.dumps({'provider': host, 'username': user, 'challenge': ch, 'signature': sig}).encode()
+req = urllib.request.Request('http://localhost:2567/auth/verify', data=payload, headers={'Content-Type': 'application/json'})
+print(urllib.request.urlopen(req).read().decode())
+'''
+open('/tmp/extract_csrf.py', 'w').write(s1)
+open('/tmp/extract_pat_csrf.py', 'w').write(s2)
+open('/tmp/do_auth.py', 'w').write(s3)
+print('Scripts created')
+"
 ```
 
 ## Step 2: Fetch signup page and extract CSRF token
