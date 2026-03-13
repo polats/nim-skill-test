@@ -820,6 +820,7 @@ function dashboardHTML(): string {
 
 <div class="tabs">
   <div class="tab active" data-tab="run">Run</div>
+  <div class="tab" data-tab="experiments">Experiments</div>
   <div class="tab" data-tab="results">Results</div>
   <div class="tab" data-tab="history">History</div>
 </div>
@@ -880,6 +881,32 @@ function dashboardHTML(): string {
   </div>
 </div>
 
+<div class="tab-content" id="tab-experiments">
+  <div class="main">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h3 style="font-family:var(--sans);font-size:0.85rem;color:var(--accent)">Experiment Log (results.tsv)</h3>
+      <button class="btn" onclick="loadExperiments()" style="font-size:0.6rem;padding:4px 10px">Refresh</button>
+    </div>
+    <table class="agent-table" id="exp-table" style="display:none">
+      <thead>
+        <tr>
+          <th style="width:30px">#</th>
+          <th style="width:80px">Commit</th>
+          <th style="width:70px">Pass Rate</th>
+          <th style="width:70px">Elapsed</th>
+          <th style="width:70px">Status</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody id="exp-tbody"></tbody>
+    </table>
+    <div class="empty" id="exp-empty">
+      <div class="empty-text">No experiments yet</div>
+      <div class="empty-hint">Run the experiment loop via program.md to populate results.tsv</div>
+    </div>
+  </div>
+</div>
+
 <div class="tab-content" id="tab-results">
   <div class="main">
     <div id="results-wrap"></div>
@@ -914,6 +941,7 @@ document.querySelectorAll('.tab').forEach(function(t) {
     document.getElementById('tab-' + t.dataset.tab).classList.add('active');
     if (t.dataset.tab === 'results') loadResults();
     if (t.dataset.tab === 'history') loadHistory();
+    if (t.dataset.tab === 'experiments') loadExperiments();
   });
 });
 
@@ -1285,6 +1313,31 @@ function toggleAgentMsgs(el) {
     }).join('');
   });
 }
+
+function loadExperiments() {
+  fetch('/api/experiments').then(function(r){return r.json();}).then(function(rows) {
+    var table = document.getElementById('exp-table');
+    var tbody = document.getElementById('exp-tbody');
+    var empty = document.getElementById('exp-empty');
+    if (!rows.length) { table.style.display='none'; empty.style.display=''; return; }
+    table.style.display=''; empty.style.display='none';
+    tbody.innerHTML = rows.map(function(r) {
+      var statusColor = r.status === 'keep' ? 'var(--green)' : r.status === 'discard' ? 'var(--red)' : 'var(--amber)';
+      var pr = r.pass_rate || '';
+      var nums = pr.match(/(\d+)\/(\d+)/);
+      var pct = nums ? Math.round(parseInt(nums[1])/parseInt(nums[2])*100) : 0;
+      var barColor = pct >= 30 ? 'var(--green)' : pct >= 15 ? 'var(--amber)' : 'var(--red)';
+      return '<tr>' +
+        '<td style="color:var(--text-dim)">' + esc(r._index) + '</td>' +
+        '<td style="font-family:var(--mono);font-size:0.65rem;color:var(--cyan)">' + esc(r.commit || '') + '</td>' +
+        '<td><div style="display:flex;align-items:center;gap:6px"><div style="width:40px;height:6px;background:var(--bg-0);border-radius:3px;overflow:hidden"><div style="width:'+pct+'%;height:100%;background:'+barColor+';border-radius:3px"></div></div><span style="font-size:0.7rem;font-weight:600">' + esc(pr) + '</span></div></td>' +
+        '<td style="font-size:0.65rem;color:var(--text-dim)">' + (r.elapsed_sec ? Math.round(r.elapsed_sec/60)+'m' : '') + '</td>' +
+        '<td style="color:'+statusColor+';font-size:0.65rem;font-weight:600;text-transform:uppercase">' + esc(r.status || '') + '</td>' +
+        '<td style="font-size:0.62rem;color:var(--text);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(r.description || '')+'">' + esc(r.description || '') + '</td>' +
+        '</tr>';
+    }).join('');
+  });
+}
 </script>
 </body>
 </html>`;
@@ -1417,6 +1470,26 @@ const httpServer = createServer(async (req, res) => {
 
   if (url.pathname === "/api/models" && req.method === "GET") {
     jsonRes(res, 200, TOOL_MODELS);
+    return;
+  }
+
+  if (url.pathname === "/api/experiments" && req.method === "GET") {
+    try {
+      const tsvPath = resolve(__dirname, "../results.tsv");
+      const tsv = readFileSync(tsvPath, "utf-8");
+      const lines = tsv.trim().split("\n");
+      const header = lines[0]?.split("\t") || [];
+      const rows = lines.slice(1).map((line, i) => {
+        const cols = line.split("\t");
+        const obj: Record<string, string> = {};
+        header.forEach((h, j) => { obj[h] = cols[j] || ""; });
+        obj._index = String(i + 1);
+        return obj;
+      });
+      jsonRes(res, 200, rows);
+    } catch {
+      jsonRes(res, 200, []);
+    }
     return;
   }
 
