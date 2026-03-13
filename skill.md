@@ -8,23 +8,25 @@ IMPORTANT: Each bash tool call runs in a fresh shell. Variables do NOT persist b
 
 ## Step 1: Create helper scripts
 
-Run this FIRST before anything else. It creates python scripts used in later steps.
+Run this FIRST before anything else. Copy-paste this entire block as one bash command.
 
 ```bash
-python3 -c "
-s1 = '''import re
+cat > /tmp/extract_csrf.py << 'PYEOF'
+import re
 html = open('/tmp/signup.html').read()
-m = re.search(r'authenticity_token[^>]*value=\"([^\"]+)\"', html)
+m = re.search(r'authenticity_token[^>]*value="([^"]+)"', html)
 t = m.group(1) if m else 'NOTFOUND'
 open('/tmp/gl_csrf.txt', 'w').write(t)
 print(t[:20] + '...')
-'''
-s2 = '''import re
+PYEOF
+cat > /tmp/extract_pat_csrf.py << 'PYEOF'
+import re
 html = open('/tmp/pat_page.html').read()
-m = re.search(r'csrf-token[^>]*content=\"([^\"]+)\"', html)
+m = re.search(r'csrf-token[^>]*content="([^"]+)"', html)
 print(m.group(1) if m else 'NOTFOUND')
-'''
-s3 = '''import json, urllib.request
+PYEOF
+cat > /tmp/do_auth.py << 'PYEOF'
+import json, urllib.request
 sig = open('/tmp/challenge.txt.sig').read()
 ch = open('/tmp/gl_challenge.txt').read().strip()
 host = open('/tmp/gl_host.txt').read().strip()
@@ -32,12 +34,8 @@ user = open('/tmp/gl_user.txt').read().strip()
 payload = json.dumps({'provider': host, 'username': user, 'challenge': ch, 'signature': sig}).encode()
 req = urllib.request.Request('http://localhost:2567/auth/verify', data=payload, headers={'Content-Type': 'application/json'})
 print(urllib.request.urlopen(req).read().decode())
-'''
-open('/tmp/extract_csrf.py', 'w').write(s1)
-open('/tmp/extract_pat_csrf.py', 'w').write(s2)
-open('/tmp/do_auth.py', 'w').write(s3)
-print('Scripts created')
-"
+PYEOF
+echo "Scripts created"
 ```
 
 ## Step 2: Fetch signup page and extract CSRF token
