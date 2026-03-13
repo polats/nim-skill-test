@@ -6,9 +6,20 @@ Goal: register on GitLab, then authenticate on the game server to get a session 
 
 IMPORTANT: Each bash tool call runs in a fresh shell. Variables do NOT persist between calls. Save values to files and read them back.
 
-## Step 1a: Fetch signup page and extract CSRF token
+## Step 1: Create helper scripts
 
-Pick a unique username (lowercase, letters/numbers/hyphens only).
+Run this FIRST before anything else. It creates python scripts used in later steps.
+
+```bash
+printf 'import re\nhtml = open("/tmp/signup.html").read()\nm = re.search("authenticity_token[^>]*value=.([^\"]+).", html)\nt = m.group(1) if m else "NOTFOUND"\nopen("/tmp/gl_csrf.txt", "w").write(t)\nprint(t[:20] + "...")\n' > /tmp/extract_csrf.py
+printf 'import re\nhtml = open("/tmp/pat_page.html").read()\nm = re.search("csrf-token[^>]*content=.([^\"]+).", html)\nprint(m.group(1) if m else "NOTFOUND")\n' > /tmp/extract_pat_csrf.py
+printf 'import json, urllib.request\nsig = open("/tmp/challenge.txt.sig").read()\nch = open("/tmp/gl_challenge.txt").read().strip()\nhost = open("/tmp/gl_host.txt").read().strip()\nuser = open("/tmp/gl_user.txt").read().strip()\npayload = json.dumps({"provider": host, "username": user, "challenge": ch, "signature": sig}).encode()\nreq = urllib.request.Request("http://localhost:2567/auth/verify", data=payload, headers={"Content-Type": "application/json"})\nprint(urllib.request.urlopen(req).read().decode())\n' > /tmp/do_auth.py
+echo "Scripts created"
+```
+
+## Step 2: Fetch signup page and extract CSRF token
+
+Pick a unique username (lowercase, letters/numbers/hyphens only). Replace MY_UNIQUE_USERNAME below.
 
 ```bash
 echo "gitlab.crux.casa" > /tmp/gl_host.txt
@@ -16,25 +27,9 @@ echo "MY_UNIQUE_USERNAME" > /tmp/gl_user.txt
 echo "/tmp/gl_cookies.txt" > /tmp/gl_cj.txt
 curl -s -c /tmp/gl_cookies.txt "https://gitlab.crux.casa/users/sign_up" -o /tmp/signup.html
 python3 /tmp/extract_csrf.py
-cat /tmp/gl_csrf.txt
 ```
 
-But first create the helper script:
-
-```bash
-cat > /tmp/extract_csrf.py << 'PYEOF'
-import re
-html = open("/tmp/signup.html").read()
-m = re.search(r'authenticity_token[^>]*value="([^"]+)"', html)
-token = m.group(1) if m else "NOTFOUND"
-open("/tmp/gl_csrf.txt", "w").write(token)
-print(token[:20] + "...")
-PYEOF
-```
-
-Run the helper script creation FIRST, then run Step 1a.
-
-## Step 1b: Register account
+## Step 3: Register account
 
 ```bash
 GITLAB=$(cat /tmp/gl_host.txt)
@@ -55,22 +50,9 @@ curl -s -b "$CJ" -c "$CJ" -X POST "https://${GITLAB}/users" \
   -o /dev/null -w "%{http_code}"
 ```
 
-302 = success. 200 = validation error (try different username). 422 = CSRF expired (re-run Step 1a).
+302 = success. 200 = validation error (try different username). 422 = CSRF expired (re-run Step 2).
 
-## Step 2: Create a Personal Access Token
-
-First create the extraction script:
-
-```bash
-cat > /tmp/extract_pat_csrf.py << 'PYEOF'
-import re
-html = open("/tmp/pat_page.html").read()
-m = re.search(r'csrf-token[^>]*content="([^"]+)"', html)
-print(m.group(1) if m else "NOTFOUND")
-PYEOF
-```
-
-Then fetch and create the PAT:
+## Step 4: Create a Personal Access Token
 
 ```bash
 GITLAB=$(cat /tmp/gl_host.txt)
@@ -87,12 +69,13 @@ python3 -c 'import json; print(json.load(open("/tmp/pat_resp.json")).get("new_to
 cat /tmp/gl_pat.txt
 ```
 
-## Step 3: Generate SSH key and add to GitLab
+## Step 5: Generate SSH key and add to GitLab
 
 ```bash
 GITLAB=$(cat /tmp/gl_host.txt)
 USER=$(cat /tmp/gl_user.txt)
 GL_PAT=$(cat /tmp/gl_pat.txt)
+rm -f /tmp/agent_ssh_key /tmp/agent_ssh_key.pub
 ssh-keygen -t ed25519 -f /tmp/agent_ssh_key -N "" -C "${USER}@${GITLAB}" -q
 PUB=$(cat /tmp/agent_ssh_key.pub)
 curl -s -X POST "https://${GITLAB}/api/v4/user/keys" \
@@ -103,24 +86,7 @@ echo "---"
 curl -s "https://${GITLAB}/${USER}.keys"
 ```
 
-## Step 4: Authenticate on game server
-
-First create the auth script:
-
-```bash
-cat > /tmp/do_auth.py << 'PYEOF'
-import json, urllib.request
-sig = open("/tmp/challenge.txt.sig").read()
-ch = open("/tmp/gl_challenge.txt").read().strip()
-host = open("/tmp/gl_host.txt").read().strip()
-user = open("/tmp/gl_user.txt").read().strip()
-payload = json.dumps({"provider": host, "username": user, "challenge": ch, "signature": sig}).encode()
-req = urllib.request.Request("http://localhost:2567/auth/verify", data=payload, headers={"Content-Type": "application/json"})
-print(urllib.request.urlopen(req).read().decode())
-PYEOF
-```
-
-Then get the challenge, sign it, and verify:
+## Step 6: Authenticate on game server
 
 ```bash
 GITLAB=$(cat /tmp/gl_host.txt)
@@ -128,6 +94,7 @@ USER=$(cat /tmp/gl_user.txt)
 CHALLENGE=$(curl -s "http://localhost:2567/auth/challenge?provider=${GITLAB}&username=${USER}" | python3 -c 'import sys,json; print(json.load(sys.stdin)["challenge"])')
 echo "$CHALLENGE" > /tmp/gl_challenge.txt
 printf '%s' "$CHALLENGE" > /tmp/challenge.txt
+rm -f /tmp/challenge.txt.sig
 ssh-keygen -Y sign -n file -f /tmp/agent_ssh_key /tmp/challenge.txt
 python3 /tmp/do_auth.py
 ```
