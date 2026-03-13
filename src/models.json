@@ -1,149 +1,387 @@
 [
   {
     "id": "meta/llama-3.1-70b-instruct",
+    "hf_id": "meta-llama/Llama-3.1-70B-Instruct",
     "provider": "meta",
     "total_params_b": 70.0,
     "active_params_b": 70.0,
-    "architecture": "Dense"
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": true
   },
   {
     "id": "meta/llama-3.3-70b-instruct",
+    "hf_id": "meta-llama/Llama-3.3-70B-Instruct",
     "provider": "meta",
     "total_params_b": 70.0,
     "active_params_b": 70.0,
-    "architecture": "Dense"
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": true
   },
   {
     "id": "meta/llama-3.1-405b-instruct",
+    "hf_id": "meta-llama/Llama-3.1-405B-Instruct",
     "provider": "meta",
     "total_params_b": 405.0,
     "active_params_b": 405.0,
-    "architecture": "Dense"
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": true
+  },
+  {
+    "id": "meta/llama-3.1-8b-instruct",
+    "hf_id": "meta-llama/Llama-3.1-8B-Instruct",
+    "provider": "meta",
+    "total_params_b": 8.0,
+    "active_params_b": 8.0,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": true
   },
   {
     "id": "meta/llama-4-maverick-17b-128e-instruct",
+    "hf_id": "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
     "provider": "meta",
     "total_params_b": 17.0,
     "active_params_b": 17.0,
-    "architecture": "Dense"
+    "architecture": "Dense",
+    "nim_tool_calling": false,
+    "hf_tool_calling": true,
+    "hf_structured": true
   },
   {
     "id": "mistralai/mistral-small-24b-instruct",
+    "hf_id": "mistralai/Mistral-Small-24B-Instruct-2501",
     "provider": "mistralai",
     "total_params_b": 24.0,
     "active_params_b": 24.0,
-    "architecture": "Dense"
+    "architecture": "Dense",
+    "nim_tool_calling": false,
+    "hf_tool_calling": false,
+    "hf_structured": false
   },
   {
     "id": "mistralai/mistral-small-3.1-24b-instruct-2503",
+    "hf_id": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
     "provider": "mistralai",
     "total_params_b": 24.0,
     "active_params_b": 24.0,
-    "architecture": "Dense"
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": false,
+    "hf_structured": false
   },
   {
     "id": "mistralai/mixtral-8x22b-instruct-v0.1",
+    "hf_id": "mistralai/Mixtral-8x22B-Instruct-v0.1",
     "provider": "mistralai",
     "total_params_b": 22.0,
     "active_params_b": 22.0,
-    "architecture": "Dense"
+    "architecture": "Dense",
+    "nim_tool_calling": false,
+    "hf_tool_calling": false,
+    "hf_structured": true
   },
   {
     "id": "mistralai/mistral-large-3-675b-instruct-2512",
+    "hf_id": "mistralai/Mistral-Large-Instruct-2411",
     "provider": "mistralai",
     "total_params_b": 675.0,
     "active_params_b": 675.0,
-    "architecture": "Dense"
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": false,
+    "hf_structured": false
   },
   {
     "id": "mistralai/devstral-2-123b-instruct-2512",
+    "hf_id": "mistralai/Devstral-Small-2505",
     "provider": "mistralai",
     "total_params_b": 123.0,
     "active_params_b": 123.0,
-    "architecture": "Dense"
-  },
-  {
-    "id": "qwen/qwq-32b",
-    "provider": "qwen",
-    "total_params_b": 32.0,
-    "active_params_b": 32.0,
-    "architecture": "Dense"
-  },
-  {
-    "id": "qwen/qwen3.5-397b-a17b",
-    "provider": "qwen",
-    "total_params_b": 397.0,
-    "active_params_b": 17.0,
-    "architecture": "MoE"
-  },
-  {
-    "id": "google/gemma-3-27b-it",
-    "provider": "google",
-    "total_params_b": 27.0,
-    "active_params_b": 27.0,
-    "architecture": "Dense"
-  },
-  {
-    "id": "google/gemma-3-12b-it",
-    "provider": "google",
-    "total_params_b": 12.0,
-    "active_params_b": 12.0,
-    "architecture": "Dense"
-  },
-  {
-    "id": "nvidia/llama-3.3-nemotron-super-49b-v1",
-    "provider": "nvidia",
-    "total_params_b": 49.0,
-    "active_params_b": 49.0,
-    "architecture": "Dense"
-  },
-  {
-    "id": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-    "provider": "nvidia",
-    "total_params_b": 49.0,
-    "active_params_b": 49.0,
-    "architecture": "Dense"
-  },
-  {
-    "id": "deepseek-ai/deepseek-v3.2",
-    "provider": "deepseek-ai",
-    "total_params_b": 685.4,
-    "active_params_b": 685.4,
-    "architecture": "Dense"
-  },
-  {
-    "id": "moonshotai/kimi-k2-instruct",
-    "provider": "moonshotai",
-    "total_params_b": 1026.5,
-    "active_params_b": 1026.5,
-    "architecture": "Dense"
-  },
-  {
-    "id": "moonshotai/kimi-k2-instruct-0905",
-    "provider": "moonshotai",
-    "total_params_b": 1026.5,
-    "active_params_b": 1026.5,
-    "architecture": "Dense"
-  },
-  {
-    "id": "abacusai/dracarys-llama-3.1-70b-instruct",
-    "provider": "abacusai",
-    "total_params_b": 70.0,
-    "active_params_b": 70.0,
-    "architecture": "Dense"
-  },
-  {
-    "id": "minimaxai/minimax-m2.5",
-    "provider": "minimaxai",
-    "total_params_b": 228.7,
-    "active_params_b": 228.7,
-    "architecture": "Dense"
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": false,
+    "hf_structured": false
   },
   {
     "id": "mistralai/ministral-14b-instruct-2512",
+    "hf_id": "mistralai/Ministral-8B-Instruct-2410",
     "provider": "mistralai",
     "total_params_b": 14.0,
     "active_params_b": 14.0,
-    "architecture": "Dense"
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": false
+  },
+  {
+    "id": "qwen/qwq-32b",
+    "hf_id": "Qwen/QwQ-32B",
+    "provider": "qwen",
+    "total_params_b": 32.0,
+    "active_params_b": 32.0,
+    "architecture": "Dense",
+    "nim_tool_calling": false,
+    "hf_tool_calling": true,
+    "hf_structured": false
+  },
+  {
+    "id": "qwen/qwen3.5-397b-a17b",
+    "hf_id": "Qwen/Qwen3.5-397B-A17B",
+    "provider": "qwen",
+    "total_params_b": 397.0,
+    "active_params_b": 17.0,
+    "architecture": "MoE",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": false
+  },
+  {
+    "id": "qwen/qwen3.5-122b-a10b",
+    "hf_id": "Qwen/Qwen3.5-122B-A10B",
+    "provider": "qwen",
+    "total_params_b": 122.0,
+    "active_params_b": 10.0,
+    "architecture": "MoE",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": false
+  },
+  {
+    "id": "qwen/qwen3-next-80b-a3b-instruct",
+    "hf_id": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+    "provider": "qwen",
+    "total_params_b": 80.0,
+    "active_params_b": 3.0,
+    "architecture": "MoE",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": true
+  },
+  {
+    "id": "qwen/qwen3-coder-480b-a35b-instruct",
+    "hf_id": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+    "provider": "qwen",
+    "total_params_b": 480.0,
+    "active_params_b": 35.0,
+    "architecture": "MoE",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": true
+  },
+  {
+    "id": "google/gemma-3-27b-it",
+    "hf_id": "google/gemma-3-27b-it",
+    "provider": "google",
+    "total_params_b": 27.0,
+    "active_params_b": 27.0,
+    "architecture": "Dense",
+    "nim_tool_calling": false,
+    "hf_tool_calling": true,
+    "hf_structured": true
+  },
+  {
+    "id": "google/gemma-3-12b-it",
+    "hf_id": "google/gemma-3-12b-it",
+    "provider": "google",
+    "total_params_b": 12.0,
+    "active_params_b": 12.0,
+    "architecture": "Dense",
+    "nim_tool_calling": false,
+    "hf_tool_calling": false,
+    "hf_structured": false
+  },
+  {
+    "id": "nvidia/llama-3.3-nemotron-super-49b-v1",
+    "hf_id": "nvidia/Llama-3.3-Nemotron-Super-49B-v1",
+    "provider": "nvidia",
+    "total_params_b": 49.0,
+    "active_params_b": 49.0,
+    "architecture": "Dense",
+    "nim_tool_calling": false,
+    "hf_tool_calling": false,
+    "hf_structured": false
+  },
+  {
+    "id": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+    "hf_id": "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
+    "provider": "nvidia",
+    "total_params_b": 49.0,
+    "active_params_b": 49.0,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": false,
+    "hf_structured": false
+  },
+  {
+    "id": "deepseek-ai/deepseek-v3.2",
+    "hf_id": "deepseek-ai/DeepSeek-V3-0324",
+    "provider": "deepseek-ai",
+    "total_params_b": 685.4,
+    "active_params_b": 685.4,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": true
+  },
+  {
+    "id": "deepseek-ai/deepseek-v3.1",
+    "hf_id": "deepseek-ai/DeepSeek-V3.1",
+    "provider": "deepseek-ai",
+    "total_params_b": 685.4,
+    "active_params_b": 685.4,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": true
+  },
+  {
+    "id": "deepseek-ai/deepseek-v3.1-terminus",
+    "hf_id": "deepseek-ai/DeepSeek-V3.1-Terminus",
+    "provider": "deepseek-ai",
+    "total_params_b": 685.4,
+    "active_params_b": 685.4,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": true
+  },
+  {
+    "id": "moonshotai/kimi-k2-instruct",
+    "hf_id": "moonshotai/Kimi-K2-Instruct",
+    "provider": "moonshotai",
+    "total_params_b": 1026.5,
+    "active_params_b": 1026.5,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": false
+  },
+  {
+    "id": "moonshotai/kimi-k2-instruct-0905",
+    "hf_id": "moonshotai/Kimi-K2-Instruct-0905",
+    "provider": "moonshotai",
+    "total_params_b": 1026.5,
+    "active_params_b": 1026.5,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": true
+  },
+  {
+    "id": "moonshotai/kimi-k2.5",
+    "hf_id": "moonshotai/Kimi-K2.5",
+    "provider": "moonshotai",
+    "total_params_b": 1026.5,
+    "active_params_b": 1026.5,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": true
+  },
+  {
+    "id": "moonshotai/kimi-k2-thinking",
+    "hf_id": "moonshotai/Kimi-K2-Thinking",
+    "provider": "moonshotai",
+    "total_params_b": 1026.5,
+    "active_params_b": 1026.5,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": false
+  },
+  {
+    "id": "abacusai/dracarys-llama-3.1-70b-instruct",
+    "hf_id": "abacusai/Dracarys-Llama-3.1-70B-Instruct",
+    "provider": "abacusai",
+    "total_params_b": 70.0,
+    "active_params_b": 70.0,
+    "architecture": "Dense",
+    "nim_tool_calling": false,
+    "hf_tool_calling": false,
+    "hf_structured": false
+  },
+  {
+    "id": "minimaxai/minimax-m2.5",
+    "hf_id": "MiniMaxAI/MiniMax-M2.5",
+    "provider": "minimaxai",
+    "total_params_b": 228.7,
+    "active_params_b": 228.7,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": false
+  },
+  {
+    "id": "minimaxai/minimax-m2.1",
+    "hf_id": "MiniMaxAI/MiniMax-M2.1",
+    "provider": "minimaxai",
+    "total_params_b": 228.7,
+    "active_params_b": 228.7,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": false
+  },
+  {
+    "id": "openai/gpt-oss-120b",
+    "hf_id": "openai/gpt-oss-120b",
+    "provider": "openai",
+    "total_params_b": 120.0,
+    "active_params_b": 120.0,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": true
+  },
+  {
+    "id": "openai/gpt-oss-20b",
+    "hf_id": "openai/gpt-oss-20b",
+    "provider": "openai",
+    "total_params_b": 20.0,
+    "active_params_b": 20.0,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": true
+  },
+  {
+    "id": "z-ai/glm4.7",
+    "hf_id": "zai-org/GLM-4.7",
+    "provider": "z-ai",
+    "total_params_b": 400.0,
+    "active_params_b": 400.0,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": false
+  },
+  {
+    "id": "z-ai/glm5",
+    "hf_id": "zai-org/GLM-5",
+    "provider": "z-ai",
+    "total_params_b": 500.0,
+    "active_params_b": 500.0,
+    "architecture": "Dense",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": false
+  },
+  {
+    "id": "stepfun-ai/step-3.5-flash",
+    "hf_id": "stepfun-ai/step-3.5-flash",
+    "provider": "stepfun-ai",
+    "total_params_b": null,
+    "active_params_b": null,
+    "architecture": "Unknown",
+    "nim_tool_calling": true,
+    "hf_tool_calling": true,
+    "hf_structured": false
   }
 ]

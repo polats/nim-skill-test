@@ -63,7 +63,7 @@ curl -s -b "$CJ" -c "$CJ" -X POST "https://${GITLAB}/-/user_settings/personal_ac
   -H "X-CSRF-Token: ${PAT_CSRF}" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
-  -d '{"personal_access_token":{"name":"agent-pat","scopes":["api","read_user","read_repository","write_repository"],"expires_at":"2027-12-31"}}' \
+  -d '{"personal_access_token":{"name":"agent-pat","scopes":["api","read_user","read_repository","write_repository"],"expires_at":"2026-12-31"}}' \
   -o /tmp/pat_resp.json
 python3 -c 'import json; print(json.load(open("/tmp/pat_resp.json")).get("new_token",""))' > /tmp/gl_pat.txt
 cat /tmp/gl_pat.txt

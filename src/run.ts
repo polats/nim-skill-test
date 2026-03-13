@@ -97,13 +97,20 @@ const rateLimiter = new RateLimiter();
 
 interface ModelInfo {
   id: string;
+  hf_id?: string;
   active_params_b: number | null;
   total_params_b?: number | null;
+  nim_tool_calling?: boolean;
+  hf_tool_calling?: boolean;
+  hf_structured?: boolean;
 }
 
-const TOOL_MODELS: ModelInfo[] = JSON.parse(
+const ALL_MODELS: ModelInfo[] = JSON.parse(
   readFileSync(resolve(__dirname, "models.json"), "utf-8"),
 );
+
+// Only test models with confirmed NIM tool calling support
+const TOOL_MODELS: ModelInfo[] = ALL_MODELS.filter((m) => m.nim_tool_calling !== false);
 
 function pickModel(forceModel?: string): ModelInfo {
   if (forceModel) {
