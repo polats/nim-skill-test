@@ -64,7 +64,9 @@ Dashboard at http://localhost:3457
 - Game server at localhost:2567 (for apocalypse-radio)
 - NVIDIA NIM API key
 
-## Current best: 14/27 (52%) apocalypse-radio
+## Current best: 15/27 (56%) apocalypse-radio
+
+Consistent passers: deepseek-v3.x, qwen3.5-x, glm4/5, kimi-k2.5, step-3.5-flash, gpt-oss-120b, qwen3-coder, mistral-large-675b
 
 ## License
 
