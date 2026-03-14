@@ -1,6 +1,9 @@
 node_modules/
 dist/
 *.db
+*.db-shm
+*.db-wal
 .env
 *.log
 results.tsv
+.agent-homes/

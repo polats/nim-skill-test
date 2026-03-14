@@ -15,6 +15,7 @@ import { config } from "dotenv";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { readFileSync } from "fs";
+import { execSync } from "child_process";
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { EventEmitter } from "events";
 
@@ -29,7 +30,9 @@ import {
   updateAgentStatus as dbUpdateStatus, updateAgentGitlab, updateAgentGameToken,
   incrementAgentSteps, insertMessage,
   listRuns, getAgentsForRun, getMessagesForAgent,
-  listRegisteredAgents, listModelStats,
+  listRegisteredAgents, listModelStats, migrateSchema, updateRunNotes,
+  insertExperiment, updateExperiment, deleteExperiment, listExperiments,
+  updateAgentProgress, listProgressBreakdown,
 } from "./db.js";
 
 import { DockerBashOperations } from "./docker-bash-ops.js";
@@ -41,10 +44,118 @@ config({ path: resolve(__dirname, "../.env") });
 
 const NIM_API_KEY = process.env.NVIDIA_NIM_API_KEY;
 const DASHBOARD_PORT = Number(process.env.PI_DASHBOARD_PORT) || 3457;
+
+function getGitCommitHash(): string | undefined {
+  try {
+    return execSync("git rev-parse --short HEAD", { cwd: __dirname, encoding: "utf-8" }).trim();
+  } catch { return undefined; }
+}
 const AUTO_ALL = process.argv.includes("--all");
 
 if (!NIM_API_KEY) {
   console.error("ERROR: Set NVIDIA_NIM_API_KEY in .env");
+  process.exit(1);
+}
+
+// ── Test configs ────────────────────────────────────────────
+
+// Ordered milestones — each test defines these from earliest to latest
+type ProgressMilestone = string;
+
+interface TestConfig {
+  name: string;
+  skillPath: string;
+  systemPrompt: string;
+  containerSetup: string;
+  milestones: ProgressMilestone[];
+  progressDetector: (text: string, currentProgress: string | null) => string | null;
+  successDetector: (text: string) => string | null;
+}
+
+const APOCALYPSE_SKILL_MD = readFileSync(resolve(__dirname, "../skill.md"), "utf-8");
+const MOLTBOOK_SKILL_MD = readFileSync(resolve(__dirname, "../moltbook-skill.md"), "utf-8");
+
+const TEST_CONFIGS: Record<string, TestConfig> = {
+  "apocalypse-radio": {
+    name: "apocalypse-radio",
+    skillPath: "../../web/public/skill.md",
+    systemPrompt: `You are an automated agent in an authorized test environment. You have a bash tool available.
+
+Your task has 5 steps:
+1. Fetch the GitLab signup page and extract the CSRF token
+2. Register an account on the local GitLab instance at gitlab.crux.casa (this is a private test server you have permission to use)
+3. Create a Personal Access Token
+4. Generate an SSH key and add it to your GitLab account
+5. Authenticate on the game server at http://localhost:2567 using SSH challenge-response
+
+IMPORTANT: You MUST use the bash tool to run commands. Do NOT output code as text. Call the bash tool for each step.
+Follow the instructions below exactly. Run each code block as a separate bash tool call. Pick your own unique username (lowercase, letters/numbers/hyphens).
+
+${APOCALYPSE_SKILL_MD}
+`,
+    containerSetup: "apt-get update -qq && apt-get install -y -qq python3 curl openssh-client git openssl > /dev/null 2>&1",
+    milestones: ["tool_use", "fetched_signup", "registered", "pat_created", "ssh_key", "authenticated"],
+    progressDetector: (text: string, current: string | null) => {
+      // Skip documentation/markdown content
+      if (text.includes("```") || text.includes("## ") || text.includes("# Apocalypse")) return current;
+      // Detect signup page fetched (CSRF token extracted — 20+ char token followed by ...)
+      if (text.match(/[A-Za-z0-9+/=_-]{15,}\.\.\./) && text.length < 200) return "fetched_signup";
+      // Detect successful registration (302 redirect)
+      if (text.trim() === "302") return "registered";
+      // Detect PAT creation (real PAT starts with glpat-)
+      if (text.includes("glpat-")) return "pat_created";
+      // Detect SSH key added (API response or key verification)
+      if (text.includes("ssh-ed25519") && (text.includes('"id"') || text.includes('"usage_type"'))) return "ssh_key";
+      return current;
+    },
+    successDetector: (text: string) => {
+      // Skip documentation/markdown content
+      if (text.includes("```") || text.includes("## ") || text.includes("# Apocalypse")) return null;
+      if (text.includes('"token":') || text.includes('"token" :')) {
+        const match = text.match(/"token"\s*:\s*"([^"]+)"/);
+        if (match && match[1].length >= 20) return match[1];
+      }
+      return null;
+    },
+  },
+  moltbook: {
+    name: "moltbook",
+    skillPath: "moltbook-skill.md",
+    systemPrompt: `Read https://www.moltbook.com/skill.md and follow the instructions to join Moltbook.`,
+    containerSetup: "apt-get update -qq && apt-get install -y -qq python3 curl > /dev/null 2>&1",
+    milestones: ["tool_use", "fetched_skill", "registered", "posted", "verified"],
+    progressDetector: (text: string, current: string | null) => {
+      // Skip documentation content — any text with markdown formatting or code blocks
+      const isDoc = text.includes("```") || text.includes("## ") || text.includes("### ") || text.includes("# Moltbook");
+      // Detect fetching skill.md (the command itself, not the output)
+      if (text.includes("moltbook.com/skill.md")) return "fetched_skill";
+      if (isDoc) return current;
+      // Detect successful registration — real API response has a real key (not example "moltbook_xxx")
+      if (text.includes('"api_key"') && text.match(/moltbook_[a-zA-Z0-9]{10,}/) && text.includes("claim_url")) return "registered";
+      // Detect post creation — real verification challenge response
+      if (text.includes("challenge_text") && text.includes("moltbook_verify_")) return "posted";
+      return current;
+    },
+    successDetector: (text: string) => {
+      // Only count as success when verification challenge is solved and content published.
+      // Must look like an actual API JSON response, not documentation examples.
+      // Real response: {"success":true,"message":"Verification successful! Your post is now published.","content_type":"post","content_id":"..."}
+      // Exclude: doc pages, markdown formatting, example blocks
+      if (text.includes("```") || text.includes("## ") || text.includes("### ")) return null;
+      if (text.includes("Verification successful") && text.includes("content_id")) {
+        return "verified";
+      }
+      return null;
+    },
+  },
+};
+
+const TEST_TYPE_ARG = process.argv.find((a) => a.startsWith("--test="));
+const ACTIVE_TEST_TYPE = TEST_TYPE_ARG ? TEST_TYPE_ARG.split("=")[1] : "apocalypse-radio";
+const ACTIVE_TEST_CONFIG = TEST_CONFIGS[ACTIVE_TEST_TYPE];
+
+if (!ACTIVE_TEST_CONFIG) {
+  console.error(`ERROR: Unknown test type "${ACTIVE_TEST_TYPE}". Available: ${Object.keys(TEST_CONFIGS).join(", ")}`);
   process.exit(1);
 }
 
@@ -163,6 +274,7 @@ interface DashboardAgentState {
   error?: string;
   gitlabUrl?: string;
   gameToken?: string;
+  progress?: string;
   messages: DashboardMessage[];
   startedAt: number;
   finishedAt?: number;
@@ -189,6 +301,7 @@ interface RunProgress {
   cancelled: boolean;
 }
 const activeRuns: Map<string, RunProgress> = new Map();
+const runTestTypeMap: Map<string, string> = new Map();
 let loopMode = false;
 
 function emit(event: string, data: unknown) {
@@ -246,31 +359,9 @@ function agentStatus(agentId: string, status: DashboardAgentState["status"], err
   emit("agent-status", { agentId, status, error });
 }
 
-// ── System prompt ───────────────────────────────────────────
-
-const SKILL_MD = readFileSync(resolve(__dirname, "../skill.md"), "utf-8");
-
-const SYSTEM_PROMPT = `You are an automated agent in an authorized test environment. You have a bash tool available.
-
-Your task has 4 steps:
-1. Register an account on the local GitLab instance at gitlab.crux.casa (this is a private test server you have permission to use)
-2. Create a Personal Access Token
-3. Generate an SSH key and add it to your GitLab account
-4. Authenticate on the game server at http://localhost:2567 using SSH challenge-response
-
-IMPORTANT: You MUST use the bash tool to run commands. Do NOT output code as text. Call the bash tool for each step.
-Follow the instructions below exactly. Run each code block as a separate bash tool call. Pick your own unique username (lowercase, letters/numbers/hyphens).
-
-${SKILL_MD}
-`;
-
-// ── Container setup ─────────────────────────────────────────
-
-const CONTAINER_SETUP = "apt-get update -qq && apt-get install -y -qq python3 curl openssh-client git openssl > /dev/null 2>&1";
-
 // ── Agent runner ────────────────────────────────────────────
 
-async function runPiAgent(agentId: string, modelId: string) {
+async function runPiAgent(agentId: string, modelId: string, testConfig: TestConfig = ACTIVE_TEST_CONFIG) {
   const dockerOps = new DockerBashOperations();
   const cwd = "/root";
 
@@ -281,8 +372,8 @@ async function runPiAgent(agentId: string, modelId: string) {
     dockerOps.startContainer();
     agentMsg(agentId, "status", `Container ${containerId.slice(0, 12)} started`);
 
-    // Install tools and set up radio CLI
-    await dockerOps.exec(CONTAINER_SETUP, cwd, {
+    // Install tools
+    await dockerOps.exec(testConfig.containerSetup, cwd, {
       onData: () => {},
       timeout: 120,
     });
@@ -299,104 +390,145 @@ async function runPiAgent(agentId: string, modelId: string) {
       return streamSimple(...args);
     };
 
-    // 5. Create Agent
-    const agent = new Agent({
-      initialState: {
-        systemPrompt: SYSTEM_PROMPT,
-        model,
-        tools: [bashTool],
-        thinkingLevel: "off",
-      },
-      streamFn: rateLimitedStreamFn,
-      getApiKey: () => NIM_API_KEY,
-    });
-
     agentStatus(agentId, "registering");
     const rp = activeRuns.get(agents.get(agentId)!.runId);
     if (rp) { rp.active++; emitProgress(); }
 
-    agentMsg(agentId, "system", SYSTEM_PROMPT);
+    agentMsg(agentId, "system", testConfig.systemPrompt);
 
-    // 6. Subscribe to agent events for dashboard
+    // 5. Run agent with retries for network/API failures (only retries if no tool calls made)
     let succeeded = false;
     let stepCount = 0;
+    let currentProgress: string | null = null;
     const MAX_STEPS = 30;
+    const MAX_RETRIES = 2;
+    const milestoneOrder = testConfig.milestones;
 
-    agent.subscribe((event: AgentEvent) => {
-      switch (event.type) {
-        case "message_end":
-          if (event.message.role === "assistant") {
-            const text = "content" in event.message
-              ? (event.message.content as any[])?.map((c: any) => c.text || "").join("") || ""
-              : "";
-            if (text) agentMsg(agentId, "assistant", text);
-          }
-          break;
-
-        case "tool_execution_start":
-          stepCount++;
-          incrementAgentSteps(agentId);
-          if (stepCount >= MAX_STEPS) {
-            agentMsg(agentId, "error", `Max steps (${MAX_STEPS}) reached — aborting`);
-            agent.abort();
-            return;
-          }
-          agentMsg(agentId, "tool", `$ ${event.args?.command || event.toolName}`);
-          break;
-
-        case "tool_execution_end": {
-          const resultText = typeof event.result === "string"
-            ? event.result
-            : event.result?.content?.map((c: any) => c.text || "").join("") || JSON.stringify(event.result);
-          agentMsg(agentId, "tool", resultText.slice(0, 4000));
-
-          // Detect success: output contains "token":
-          if (resultText.includes('"token":') || resultText.includes('"token" :')) {
-            succeeded = true;
-            // Try to extract the token
-            const tokenMatch = resultText.match(/"token"\s*:\s*"([^"]+)"/);
-            if (tokenMatch) {
-              updateAgentGameToken(agentId, tokenMatch[1]);
-            }
-          }
-
-          // Detect registration (gitlab URL in output)
-          const gitlabMatch = resultText.match(/https?:\/\/[^\s]*gitlab[^\s]*/i);
-          if (gitlabMatch) {
-            updateAgentGitlab(agentId, gitlabMatch[0]);
-            agentStatus(agentId, "authenticating");
-            emit("agent-registered", { agentId, gitlabUrl: gitlabMatch[0] });
-          }
-          break;
-        }
-
-        case "tool_execution_update":
-          // partial output — no-op for now
-          break;
+    function advanceProgress(newMilestone: string) {
+      const newIdx = milestoneOrder.indexOf(newMilestone);
+      const curIdx = currentProgress ? milestoneOrder.indexOf(currentProgress) : -1;
+      if (newIdx > curIdx) {
+        currentProgress = newMilestone;
+        const agentState = agents.get(agentId);
+        if (agentState) agentState.progress = currentProgress;
+        updateAgentProgress(agentId, currentProgress);
+        emit("agent-progress", { agentId, progress: currentProgress });
       }
-    });
+    }
 
-    // 7. Run the agent with retry nudges for models that output text instead of tool calls
-    await agent.prompt("Go.");
-    await agent.waitForIdle();
+    function createSubscribedAgent() {
+      const agent = new Agent({
+        initialState: {
+          systemPrompt: testConfig.systemPrompt,
+          model,
+          tools: [bashTool],
+          thinkingLevel: "off",
+        },
+        streamFn: rateLimitedStreamFn,
+        getApiKey: () => NIM_API_KEY,
+      });
 
-    // If no tool calls were made, nudge the model to use the bash tool (up to 3 retries)
-    const MAX_NUDGES = 3;
-    for (let nudge = 0; nudge < MAX_NUDGES && !succeeded && stepCount === 0; nudge++) {
-      agentMsg(agentId, "status", `No tool calls detected — nudging (${nudge + 1}/${MAX_NUDGES})`);
-      await agent.prompt(
-        "You must use the bash tool to run commands. Do NOT output code as text or JSON. " +
-        "Call the bash tool with the command from Step 1a. Start now."
-      );
-      await agent.waitForIdle();
+      agent.subscribe((event: AgentEvent) => {
+        switch (event.type) {
+          case "message_end":
+            if (event.message.role === "assistant") {
+              const text = "content" in event.message
+                ? (event.message.content as any[])?.map((c: any) => c.text || "").join("") || ""
+                : "";
+              if (text) agentMsg(agentId, "assistant", text);
+            }
+            break;
+
+          case "tool_execution_start":
+            stepCount++;
+            incrementAgentSteps(agentId);
+            // First tool use is itself a milestone
+            if (stepCount === 1) advanceProgress("tool_use");
+            if (stepCount >= MAX_STEPS) {
+              agentMsg(agentId, "error", `Max steps (${MAX_STEPS}) reached — aborting`);
+              agent.abort();
+              return;
+            }
+            agentMsg(agentId, "tool", `$ ${event.args?.command || event.toolName}`);
+            break;
+
+          case "tool_execution_end": {
+            const resultText = typeof event.result === "string"
+              ? event.result
+              : event.result?.content?.map((c: any) => c.text || "").join("") || JSON.stringify(event.result);
+            agentMsg(agentId, "tool", resultText.slice(0, 4000));
+
+            // Track progress milestones
+            const newProgress = testConfig.progressDetector(resultText, currentProgress);
+            if (newProgress && newProgress !== currentProgress) {
+              advanceProgress(newProgress);
+            }
+
+            // Detect success using test config's detector
+            const successResult = testConfig.successDetector(resultText);
+            if (successResult) {
+              succeeded = true;
+              updateAgentGameToken(agentId, successResult);
+              // Mark final milestone
+              const lastMilestone = milestoneOrder[milestoneOrder.length - 1];
+              advanceProgress(lastMilestone);
+            }
+
+            // Detect registration (gitlab URL in output) — for apocalypse-radio
+            const gitlabMatch = resultText.match(/https?:\/\/[^\s]*gitlab[^\s]*/i);
+            if (gitlabMatch) {
+              updateAgentGitlab(agentId, gitlabMatch[0]);
+              agentStatus(agentId, "authenticating");
+              emit("agent-registered", { agentId, gitlabUrl: gitlabMatch[0] });
+            }
+            break;
+          }
+
+          case "tool_execution_update":
+            break;
+        }
+      });
+
+      return agent;
+    }
+
+    let agent = createSubscribedAgent();
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        await agent.prompt("Go.");
+        await agent.waitForIdle();
+        // Retry if model responded but never called tools (possible flaky response)
+        if (stepCount === 0 && attempt < MAX_RETRIES) {
+          agentMsg(agentId, "status", `No tool calls on attempt ${attempt + 1}/${MAX_RETRIES + 1}, retrying in 5s...`);
+          console.log(`  [retry] ${modelId} attempt ${attempt + 1}: no tool calls, retrying...`);
+          await new Promise(r => setTimeout(r, 5000));
+          agent.abort();
+          agent = createSubscribedAgent();
+          continue;
+        }
+        break;
+      } catch (runErr) {
+        const errMsg = (runErr as Error).message || String(runErr);
+        if (stepCount === 0 && attempt < MAX_RETRIES) {
+          agentMsg(agentId, "status", `Network/API error on attempt ${attempt + 1}/${MAX_RETRIES + 1}, retrying in 5s... (${errMsg.slice(0, 100)})`);
+          console.log(`  [retry] ${modelId} attempt ${attempt + 1}: error: ${errMsg.slice(0, 100)}`);
+          await new Promise(r => setTimeout(r, 5000));
+          agent.abort();
+          agent = createSubscribedAgent();
+          continue;
+        }
+        throw runErr;
+      }
     }
 
     // Check result
+    const finalProgress = currentProgress || "none";
     if (succeeded) {
       agentStatus(agentId, "done");
-      agentMsg(agentId, "status", "Success — game token received");
+      agentMsg(agentId, "status", `Success — reached: ${finalProgress}`);
     } else {
-      agentStatus(agentId, "failed", "Agent finished without obtaining a game token");
+      agentStatus(agentId, "failed", `Reached: ${finalProgress}`);
     }
 
     // Cleanup
@@ -412,13 +544,14 @@ async function runPiAgent(agentId: string, modelId: string) {
 
 // ── Run orchestration ──────────────────────────────────────
 
-async function launchAllModels(concurrency = 5): Promise<string> {
+async function launchAllModels(concurrency = 5, testConfig: TestConfig = ACTIVE_TEST_CONFIG): Promise<string> {
   const runId = Math.random().toString(36).slice(2, 6);
   runCounter++;
   const now = Date.now();
   const modelCount = TOOL_MODELS.length;
 
-  insertRun({ id: runId, gameServer: "docker", modelFilter: "all-tool", agentCount: modelCount, startedAt: now });
+  insertRun({ id: runId, gameServer: "docker", modelFilter: "all-tool", agentCount: modelCount, startedAt: now, testType: testConfig.name });
+  runTestTypeMap.set(runId, testConfig.name);
 
   // Clear agents from finished runs
   const activeAgentIds = new Set<string>();
@@ -438,7 +571,7 @@ async function launchAllModels(concurrency = 5): Promise<string> {
   activeRuns.set(runId, rp);
 
   emit("run-clear", { runId });
-  emit("run-start", { runId, total: modelCount, model: "all-tool" });
+  emit("run-start", { runId, total: modelCount, model: "all-tool", testType: testConfig.name });
 
   // Create all agent entries upfront
   const queue: { agentId: string; username: string; email: string; model: string }[] = [];
@@ -466,7 +599,7 @@ async function launchAllModels(concurrency = 5): Promise<string> {
       const a = agents.get(item.agentId);
       if (a) a.startedAt = Date.now();
       try {
-        await runPiAgent(item.agentId, item.model);
+        await runPiAgent(item.agentId, item.model, testConfig);
       } catch (err) {
         agentMsg(item.agentId, "error", (err as Error).message);
         agentStatus(item.agentId, "failed", (err as Error).message);
@@ -485,6 +618,20 @@ async function launchAllModels(concurrency = 5): Promise<string> {
     const passed = rp.passed;
     const failed = rp.failed;
     activeRuns.delete(runId);
+
+    // Auto-log experiment
+    insertExperiment({
+      commitHash: getGitCommitHash(),
+      testType: testConfig.name,
+      description: "",
+      status: "keep",
+      passRate: `${passed}/${modelCount}`,
+      passed,
+      failed,
+      total: modelCount,
+      runId,
+    });
+
     emit("run-complete", { runId });
     emitProgress();
     console.log(`  Run ${runId} finished. ${passed}/${modelCount} passed.`);
@@ -515,26 +662,27 @@ async function launchAllModels(concurrency = 5): Promise<string> {
 
     if (loopMode && !rp.cancelled) {
       console.log(`  Loop mode: starting next run...`);
-      setTimeout(() => launchAllModels(concurrency), 2000);
+      setTimeout(() => launchAllModels(concurrency, testConfig), 2000);
     }
   });
 
   return runId;
 }
 
-async function launchRun(count: number, forceModel?: string): Promise<string> {
+async function launchRun(count: number, forceModel?: string, testConfig: TestConfig = ACTIVE_TEST_CONFIG): Promise<string> {
   const runId = Math.random().toString(36).slice(2, 6);
   runCounter++;
   const now = Date.now();
 
-  insertRun({ id: runId, gameServer: "docker", modelFilter: forceModel || "random", agentCount: count, startedAt: now });
+  insertRun({ id: runId, gameServer: "docker", modelFilter: forceModel || "random", agentCount: count, startedAt: now, testType: testConfig.name });
+  runTestTypeMap.set(runId, testConfig.name);
 
   activeRuns.set(runId, {
     runId, total: count, completed: 0, passed: 0, failed: 0,
     active: 0, startTime: now, completionTimes: [], cancelled: false,
   });
 
-  emit("run-start", { runId, total: count, model: forceModel || "random" });
+  emit("run-start", { runId, total: count, model: forceModel || "random", testType: testConfig.name });
 
   const promises: Promise<void>[] = [];
   for (let i = 0; i < count; i++) {
@@ -552,7 +700,7 @@ async function launchRun(count: number, forceModel?: string): Promise<string> {
     emit("agent-init", state);
 
     promises.push(
-      runPiAgent(agentId, model.id).catch((err) => {
+      runPiAgent(agentId, model.id, testConfig).catch((err) => {
         agentMsg(agentId, "error", (err as Error).message);
         agentStatus(agentId, "failed", (err as Error).message);
       }),
@@ -563,7 +711,23 @@ async function launchRun(count: number, forceModel?: string): Promise<string> {
 
   Promise.all(promises).then(() => {
     finishRun(runId);
+    const rp = activeRuns.get(runId);
+    const passed = rp?.passed ?? 0;
+    const failed = rp?.failed ?? 0;
     activeRuns.delete(runId);
+
+    insertExperiment({
+      commitHash: getGitCommitHash(),
+      testType: testConfig.name,
+      description: "",
+      status: "keep",
+      passRate: `${passed}/${count}`,
+      passed,
+      failed,
+      total: count,
+      runId,
+    });
+
     emit("run-complete", { runId });
     emitProgress();
     console.log(`  Run ${runId} finished.`);
@@ -647,6 +811,48 @@ function dashboardHTML(): string {
     border-radius: 3px;
     margin-left: -16px;
   }
+  .pill-switcher {
+    display: inline-flex;
+    border: 1px solid var(--border-hi);
+    border-radius: 6px;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .pill-btn {
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    font-weight: 600;
+    padding: 6px 14px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .pill-btn:hover { color: var(--text); background: var(--bg-3); }
+  .pill-btn.pill-active-ar { background: var(--accent); color: var(--bg-0); }
+  .pill-btn.pill-active-mb { background: #e63946; color: var(--bg-0); }
+
+  .test-type-badge {
+    display: inline-block;
+    font-size: 0.5rem;
+    padding: 1px 5px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+    margin-left: 6px;
+  }
+  .test-type-badge.tt-apocalypse-radio { background: #1a0a2a; color: var(--purple); }
+  .test-type-badge.tt-moltbook { background: #2a0a0e; color: #e63946; }
+
+  /* Moltbook theme override */
+  body.theme-moltbook { --accent: #e63946; --accent-dim: #7a1a20; }
+  body.theme-moltbook .pill-btn.pill-active-ar { background: transparent; color: var(--text-dim); }
+  body.theme-moltbook .pill-btn.pill-active-mb { background: #e63946; color: var(--bg-0); }
 
   .tabs {
     display: flex;
@@ -782,8 +988,35 @@ function dashboardHTML(): string {
   .rate-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
   .rate-bar-pct { font-size: 0.68rem; font-weight: 600; min-width: 36px; text-align: right; }
 
+  .exp-input { background: var(--bg-0); border: 1px solid var(--border); color: var(--text); font-family: var(--mono); font-size: 0.62rem; padding: 4px 6px; border-radius: 4px; width: 100%; box-sizing: border-box; transition: border-color 0.3s; }
+  .exp-input:focus { outline: none; border-color: var(--accent); }
+  .exp-input::placeholder { color: var(--text-dim); opacity: 0.5; }
+  .exp-status-keep { color: var(--green); }
+  .exp-status-discard { color: var(--amber); }
+  .exp-status-crash { color: var(--red); }
+  .exp-row-actions { opacity: 0; transition: opacity 0.15s; }
+  .results-table tr:hover .exp-row-actions { opacity: 1; }
+  .exp-action-btn { background: none; border: 1px solid var(--border); color: var(--text-dim); font-size: 0.55rem; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-family: var(--mono); }
+  .exp-action-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  .history-section-header { font-family: var(--sans); font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; padding: 8px 0 10px; display: flex; align-items: center; gap: 8px; }
+  .history-section-header .hsh-icon { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+  .history-section-header.hsh-active { color: var(--amber); }
+  .history-section-header.hsh-active .hsh-icon { background: var(--amber); animation: pulse 1.5s ease-in-out infinite; }
+  .history-section-header.hsh-completed { color: var(--text-dim); margin-top: 20px; }
+  .history-section-header.hsh-completed .hsh-icon { background: var(--text-dim); }
+
+  .history-sort-bar { display: flex; gap: 2px; margin-bottom: 10px; flex-wrap: wrap; }
+  .history-sort-btn { font-family: var(--mono); font-size: 0.58rem; font-weight: 500; padding: 4px 10px; background: var(--bg-2); border: 1px solid var(--border); color: var(--text-dim); cursor: pointer; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.05em; transition: all 0.15s; user-select: none; }
+  .history-sort-btn:hover { color: var(--text); border-color: var(--border-hi); }
+  .history-sort-btn.sort-active { color: var(--accent); border-color: var(--accent-dim); background: rgba(186,255,0,0.05); }
+  .history-sort-btn .sort-arrow { display: inline-block; margin-left: 3px; font-size: 0.45rem; opacity: 0.4; }
+  .history-sort-btn.sort-active .sort-arrow { opacity: 1; }
+
   .history-item { background: var(--bg-1); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 10px; overflow: hidden; max-width: 900px; }
-  .history-item.hi-active { border-color: var(--accent); background: rgba(186,255,0,0.03); }
+  .history-item.hi-active { border-color: var(--amber); background: rgba(255,183,0,0.03); }
+  .history-item.hi-active .run-id { color: var(--amber); }
+  .hi-pulse-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--amber); animation: pulse 1.5s ease-in-out infinite; margin-right: 6px; vertical-align: middle; }
   .history-head { padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: background 0.15s; }
   .history-head:hover { background: var(--bg-2); }
   .history-meta { font-size: 0.75rem; }
@@ -792,8 +1025,9 @@ function dashboardHTML(): string {
   .history-stats { display: flex; gap: 12px; font-size: 0.68rem; }
   .history-stats .hs-ok { color: var(--green); }
   .history-stats .hs-fail { color: var(--red); }
-  .history-body { display: none; border-top: 1px solid var(--border); padding: 12px 16px; max-height: 500px; overflow-y: auto; }
+  .history-body { display: none; border-top: 1px solid var(--border); }
   .history-body.open { display: block; }
+  .history-body-inner { padding: 12px 16px; max-height: 500px; overflow-y: auto; }
   .history-agent { margin-bottom: 10px; padding: 8px 10px; background: var(--bg-2); border-radius: 4px; border-left: 2px solid var(--border); }
   .history-agent.ha-done { border-left-color: var(--green); }
   .history-agent.ha-failed { border-left-color: var(--red); }
@@ -833,6 +1067,10 @@ function dashboardHTML(): string {
 </div>
 
 <div class="controls" id="controls">
+  <div class="pill-switcher" id="pill-switcher">
+    <button class="pill-btn pill-active-ar" id="pill-ar" onclick="selectTest('apocalypse-radio')">Apocalypse Radio</button>
+    <button class="pill-btn" id="pill-mb" onclick="selectTest('moltbook')">Moltbook</button>
+  </div>
   <button class="btn" id="btn-all" onclick="startAll()">Test All Models (${modelCount})</button>
   <button class="btn" id="btn-loop" onclick="toggleLoop()" style="border-color:var(--amber);color:var(--amber)">Loop</button>
   <button class="btn btn-cancel" id="btn-cancel" onclick="cancelRun()" style="display:none">Cancel</button>
@@ -851,6 +1089,7 @@ function dashboardHTML(): string {
 
 <div class="progress-banner" id="progress-banner">
   <div class="progress-stats">
+    <span id="pg-test-badge" class="test-type-badge" style="display:none"></span>
     <span><span class="ps-label">Complete</span> <span class="ps-val" id="pg-done">0</span>/<span id="pg-total">0</span></span>
     <span><span class="ps-label">Passed</span> <span class="ps-val ps-passed" id="pg-passed">0</span></span>
     <span><span class="ps-label">Failed</span> <span class="ps-val ps-failed" id="pg-failed">0</span></span>
@@ -867,20 +1106,42 @@ function dashboardHTML(): string {
 
 <div class="tab-content active" id="tab-run">
   <div class="main">
-    <table class="agent-table" id="agent-table" style="display:none">
-      <thead>
-        <tr>
-          <th style="width:30px">#</th>
-          <th>Model</th>
-          <th style="width:60px">Size</th>
-          <th style="width:100px">Status</th>
-          <th style="width:50px">Steps</th>
-          <th style="width:60px">Time</th>
-          <th>Error</th>
-        </tr>
-      </thead>
-      <tbody id="agent-tbody"></tbody>
-    </table>
+    <div id="run-active-section" style="display:none">
+      <div class="history-section-header hsh-active"><span class="hsh-icon"></span> Running <span id="run-test-badge" class="test-type-badge" style="display:none"></span></div>
+      <table class="agent-table" id="active-table">
+        <thead>
+          <tr>
+            <th style="width:30px">#</th>
+            <th>Model</th>
+            <th style="width:60px">Size</th>
+            <th style="width:100px">Status</th>
+            <th style="width:120px">Progress</th>
+            <th style="width:50px">Steps</th>
+            <th style="width:60px">Time</th>
+            <th>Error</th>
+          </tr>
+        </thead>
+        <tbody id="active-tbody"></tbody>
+      </table>
+    </div>
+    <div id="run-done-section" style="display:none">
+      <div class="history-section-header hsh-completed" style="margin-top:16px"><span class="hsh-icon"></span> Completed</div>
+      <table class="results-table" id="done-table">
+        <thead>
+          <tr>
+            <th style="width:30px" onclick="sortDone('idx')"># <span class="sort-arrow">&#9650;</span></th>
+            <th onclick="sortDone('model')">Model <span class="sort-arrow">&#9650;</span></th>
+            <th style="width:60px" onclick="sortDone('params')">Size <span class="sort-arrow">&#9650;</span></th>
+            <th style="width:100px" onclick="sortDone('status')">Status <span class="sort-arrow">&#9650;</span></th>
+            <th style="width:120px" onclick="sortDone('progress')">Progress <span class="sort-arrow">&#9650;</span></th>
+            <th style="width:50px" onclick="sortDone('steps')">Steps <span class="sort-arrow">&#9650;</span></th>
+            <th style="width:60px" onclick="sortDone('elapsed')">Time <span class="sort-arrow">&#9650;</span></th>
+            <th onclick="sortDone('error')">Error <span class="sort-arrow">&#9650;</span></th>
+          </tr>
+        </thead>
+        <tbody id="done-tbody"></tbody>
+      </table>
+    </div>
     <div class="empty" id="run-empty">
       <div class="empty-text">Ready to test</div>
       <div class="empty-hint">Hit "Test All Models" to benchmark ${modelCount} tool-calling models via pi-agent</div>
@@ -890,26 +1151,26 @@ function dashboardHTML(): string {
 
 <div class="tab-content" id="tab-experiments">
   <div class="main">
+    <div style="background:var(--bg-1);border:1px solid var(--border);border-radius:6px;margin-bottom:16px;overflow:hidden">
+      <div onclick="document.getElementById('sysprompt-body').classList.toggle('open');this.querySelector('.sp-arrow').innerHTML=document.getElementById('sysprompt-body').classList.contains('open')?'&#9660;':'&#9654;'" style="padding:10px 16px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:0.72rem;font-weight:600;color:var(--cyan);transition:background 0.15s" onmouseover="this.style.background='var(--bg-2)'" onmouseout="this.style.background=''">
+        <span class="sp-arrow" style="font-size:0.55rem">&#9654;</span> System Prompt
+        <span style="font-size:0.55rem;color:var(--text-muted);font-weight:400;margin-left:8px">(shared by all agents)</span>
+      </div>
+      <div id="sysprompt-body" style="display:none;border-top:1px solid var(--border);padding:12px 16px;max-height:400px;overflow-y:auto;background:var(--bg-0)">
+        <pre id="sysprompt-text" style="font-size:0.62rem;line-height:1.6;color:var(--text);white-space:pre-wrap;word-break:break-word">${TEST_CONFIGS["apocalypse-radio"].systemPrompt.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')}</pre>
+      </div>
+    </div>
+    <style>#sysprompt-body.open { display: block !important; }</style>
+
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <h3 style="font-family:var(--sans);font-size:0.85rem;color:var(--accent)">Experiment Log (results.tsv)</h3>
+      <h3 style="font-family:var(--sans);font-size:0.85rem;color:var(--accent)">Experiment Log</h3>
       <button class="btn" onclick="loadExperiments()" style="font-size:0.6rem;padding:4px 10px">Refresh</button>
     </div>
-    <table class="agent-table" id="exp-table" style="display:none">
-      <thead>
-        <tr>
-          <th style="width:30px">#</th>
-          <th style="width:80px">Commit</th>
-          <th style="width:70px">Pass Rate</th>
-          <th style="width:70px">Elapsed</th>
-          <th style="width:70px">Status</th>
-          <th>Description</th>
-        </tr>
-      </thead>
-      <tbody id="exp-tbody"></tbody>
-    </table>
+
+    <div id="exp-wrap"></div>
     <div class="empty" id="exp-empty">
       <div class="empty-text">No experiments yet</div>
-      <div class="empty-hint">Run the experiment loop via program.md to populate results.tsv</div>
+      <div class="empty-hint">Experiments are auto-logged when runs complete</div>
     </div>
   </div>
 </div>
@@ -926,7 +1187,15 @@ function dashboardHTML(): string {
 
 <div class="tab-content" id="tab-history">
   <div class="main">
-    <div id="history-list"></div>
+    <div id="history-active-section" style="display:none">
+      <div class="history-section-header hsh-active"><span class="hsh-icon"></span> Active Runs</div>
+      <div id="history-active-list"></div>
+    </div>
+    <div id="history-completed-section" style="display:none">
+      <div class="history-section-header hsh-completed"><span class="hsh-icon"></span> Completed Runs</div>
+      <div class="history-sort-bar" id="history-sort-bar"></div>
+      <div id="history-completed-list"></div>
+    </div>
     <div class="empty" id="history-empty">
       <div class="empty-text">No past runs</div>
     </div>
@@ -938,7 +1207,57 @@ var agents = {};
 var expandedAgent = null;
 var currentRunId = null;
 var paramMap = {};
+var selectedTestType = 'apocalypse-radio';
 ${JSON.stringify(TOOL_MODELS.map(m => ({ id: m.id, p: m.active_params_b })))}.forEach(function(m) { paramMap[m.id] = m.p; });
+var systemPrompts = ${JSON.stringify(Object.fromEntries(Object.entries(TEST_CONFIGS).map(([k, v]) => [k, v.systemPrompt])))};
+
+var currentTestType = '';
+
+function selectTest(testType) {
+  selectedTestType = testType;
+  // Update milestones for progress display
+  currentMilestones = testType === 'moltbook'
+    ? ['tool_use','fetched_skill','registered','posted','verified']
+    : ['tool_use','registered','pat_created','ssh_key','authenticated'];
+  // Update pills
+  document.getElementById('pill-ar').className = 'pill-btn' + (testType === 'apocalypse-radio' ? ' pill-active-ar' : '');
+  document.getElementById('pill-mb').className = 'pill-btn' + (testType === 'moltbook' ? ' pill-active-mb' : '');
+  // Switch theme
+  document.body.className = testType === 'moltbook' ? 'theme-moltbook' : '';
+  // Update system prompt
+  var promptEl = document.getElementById('sysprompt-text');
+  if (promptEl && systemPrompts[testType]) promptEl.textContent = systemPrompts[testType];
+  // Re-render Run tab with pill filter
+  document.getElementById('active-tbody').innerHTML = '';
+  document.getElementById('done-tbody').innerHTML = '';
+  var hasVisible = false;
+  for (var id in agents) {
+    if (agentMatchesPill(agents[id])) { hasVisible = true; placeAgent(agents[id]); }
+  }
+  document.getElementById('run-empty').style.display = hasVisible ? 'none' : '';
+  document.getElementById('run-active-section').style.display = hasVisible ? '' : 'none';
+  document.getElementById('run-done-section').style.display = hasVisible ? '' : 'none';
+  // Refresh all data tabs with filter
+  loadResults();
+  loadHistory();
+}
+
+function testTypeParam() {
+  return selectedTestType ? '?test_type=' + encodeURIComponent(selectedTestType) : '';
+}
+
+function showTestBadge(elId, testType) {
+  var el = document.getElementById(elId);
+  if (!el || !testType) return;
+  el.textContent = testType;
+  el.className = 'test-type-badge tt-' + testType;
+  el.style.display = '';
+}
+
+function hideTestBadge(elId) {
+  var el = document.getElementById(elId);
+  if (el) el.style.display = 'none';
+}
 
 document.querySelectorAll('.tab').forEach(function(t) {
   t.addEventListener('click', function() {
@@ -956,8 +1275,9 @@ var runIds = [];
 
 function startAll() {
   document.getElementById('btn-cancel').style.display = '';
+  var testName = selectedTestType || 'apocalypse-radio';
   document.getElementById('ctrl-status').textContent = 'Starting...';
-  fetch('/api/start-all', { method: 'POST' })
+  fetch('/api/start-all', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ test_type: testName }) })
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.error) { document.getElementById('ctrl-status').textContent = d.error; return; }
@@ -974,7 +1294,7 @@ function toggleLoop() {
     setLoopUI(false);
     document.getElementById('ctrl-status').textContent = 'Loop stopped';
   } else {
-    fetch('/api/start-loop', { method: 'POST' }).then(function(r){return r.json();}).then(function(d) {
+    fetch('/api/start-loop', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ test_type: selectedTestType || 'apocalypse-radio' }) }).then(function(r){return r.json();}).then(function(d) {
       if (d.runId) runIds.push(d.runId);
     });
     setLoopUI(true);
@@ -1038,18 +1358,66 @@ function updateRPM(rpm, limit, pending) {
 }
 
 var agentOrder = [];
+var terminalStatuses = {'done':1,'connected':1,'failed':1};
+var doneSortKey = 'idx';
+var doneSortDir = 1;
+var runTestTypes = {};
+
+function agentMatchesPill(a) {
+  var runType = runTestTypes[a.runId] || currentTestType;
+  return runType === selectedTestType;
+}
 
 function ensureRow(a) {
-  if (document.getElementById('ar-'+a.id)) return;
-  agentOrder.push(a.id);
-  var tbody = document.getElementById('agent-tbody');
-  var tr = document.createElement('tr');
-  tr.id = 'ar-' + a.id;
-  tr.onclick = function() { toggleDetail(a.id); };
-  tr.innerHTML = rowHTML(a);
-  tbody.appendChild(tr);
-  document.getElementById('agent-table').style.display = '';
+  agents[a.id] = agents[a.id] || a;
+  if (agentOrder.indexOf(a.id) === -1) agentOrder.push(a.id);
+  if (!agentMatchesPill(a)) return;
   document.getElementById('run-empty').style.display = 'none';
+  placeAgent(a);
+}
+
+function placeAgent(a) {
+  var isTerminal = a.status in terminalStatuses;
+  var existingTr = document.getElementById('ar-' + a.id);
+  var existingDetail = document.getElementById('detail-' + a.id);
+
+  // Remove from old location
+  if (existingTr) existingTr.remove();
+  if (existingDetail) existingDetail.remove();
+
+  if (isTerminal) {
+    // Add to done section
+    document.getElementById('run-done-section').style.display = '';
+    renderDoneTable();
+  } else {
+    // Add to active section
+    document.getElementById('run-active-section').style.display = '';
+    var tbody = document.getElementById('active-tbody');
+    var tr = document.createElement('tr');
+    tr.id = 'ar-' + a.id;
+    tr.className = 'row-active';
+    tr.onclick = function() { toggleDetail(a.id); };
+    tr.innerHTML = rowHTML(a);
+    tbody.appendChild(tr);
+  }
+}
+
+var currentMilestones = currentTestType === 'moltbook'
+  ? ['tool_use','fetched_skill','registered','posted','verified']
+  : ['tool_use','registered','pat_created','ssh_key','authenticated'];
+
+function milestoneHTML(progress) {
+  var ms = currentMilestones;
+  var reached = progress ? ms.indexOf(progress) : -1;
+  var dots = '';
+  for (var i = 0; i < ms.length; i++) {
+    var label = ms[i].replace(/_/g, ' ');
+    var color = i <= reached ? 'var(--green)' : 'var(--bg-3)';
+    var textColor = i <= reached ? 'var(--green)' : 'var(--text-muted)';
+    dots += '<span title="'+label+'" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+color+';margin-right:2px"></span>';
+  }
+  var label = progress ? progress.replace(/_/g, ' ') : 'none';
+  return '<div style="display:flex;align-items:center;gap:4px">'+dots+'<span style="font-size:0.55rem;color:var(--text-dim)">'+label+'</span></div>';
 }
 
 function rowHTML(a) {
@@ -1063,34 +1431,98 @@ function rowHTML(a) {
     steps = (agents[a.id].messages || []).filter(function(m) { return m.role === 'tool' && m.content.charAt(0) === '$'; }).length;
   }
   var err = a.error ? esc(a.error).substring(0, 120) : '';
+  var prog = a.progress || (agents[a.id] || {}).progress || null;
   return '<td>'+idx+'</td>' +
     '<td class="at-model" title="'+esc(a.model)+'">'+esc(short)+'<div class="at-vendor">'+esc(vendor)+'</div></td>' +
     '<td class="at-params">'+(p ? p+'B' : '')+'</td>' +
     '<td><span class="badge badge-'+a.status+'">'+a.status+'</span></td>' +
+    '<td>'+milestoneHTML(prog)+'</td>' +
     '<td>'+steps+'</td>' +
     '<td style="color:var(--text-dim)">'+elapsed+'</td>' +
     '<td style="font-size:0.62rem;color:var(--red);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(a.error||'')+'">'+err+'</td>';
 }
 
-var activeStatuses = {'registering':1,'authenticating':1,'running':1,'starting':1};
+function agentSortVal(a, key) {
+  if (key === 'idx') return agentOrder.indexOf(a.id);
+  if (key === 'model') return (a.model || '').toLowerCase();
+  if (key === 'params') return paramMap[a.model] || 0;
+  if (key === 'status') return a.status === 'done' || a.status === 'connected' ? 0 : 1;
+  if (key === 'progress') {
+    var prog = a.progress || (agents[a.id] || {}).progress || null;
+    return prog ? currentMilestones.indexOf(prog) : -1;
+  }
+  if (key === 'steps') {
+    var msgs = (agents[a.id] || {}).messages || [];
+    return msgs.filter(function(m) { return m.role === 'tool' && m.content.charAt(0) === '$'; }).length;
+  }
+  if (key === 'elapsed') return a.finishedAt ? (a.finishedAt - a.startedAt) : 0;
+  if (key === 'error') return a.error || '';
+  return 0;
+}
+
+function sortDone(key) {
+  if (doneSortKey === key) doneSortDir *= -1;
+  else { doneSortKey = key; doneSortDir = key === 'model' || key === 'error' ? 1 : -1; }
+  renderDoneTable();
+}
+
+function renderDoneTable() {
+  var doneAgents = [];
+  for (var id in agents) {
+    var a = agents[id];
+    if (a.status in terminalStatuses) doneAgents.push(a);
+  }
+  if (!doneAgents.length) { document.getElementById('run-done-section').style.display = 'none'; return; }
+  doneAgents.sort(function(a, b) {
+    var va = agentSortVal(a, doneSortKey), vb = agentSortVal(b, doneSortKey);
+    if (typeof va === 'string') { va = va.toLowerCase(); vb = (vb||'').toLowerCase(); }
+    if (va < vb) return -1 * doneSortDir;
+    if (va > vb) return 1 * doneSortDir;
+    return 0;
+  });
+
+  // Update sort arrows in header
+  var ths = document.querySelectorAll('#done-table thead th');
+  var keys = ['idx','model','params','status','steps','elapsed','error'];
+  ths.forEach(function(th, i) {
+    var k = keys[i];
+    var active = doneSortKey === k;
+    th.className = active ? 'sort-active' : '';
+    var arrow = th.querySelector('.sort-arrow');
+    if (arrow) arrow.innerHTML = active ? (doneSortDir === 1 ? '&#9650;' : '&#9660;') : '&#9650;';
+  });
+
+  var tbody = document.getElementById('done-tbody');
+  tbody.innerHTML = '';
+  doneAgents.forEach(function(a) {
+    var tr = document.createElement('tr');
+    tr.id = 'ar-' + a.id;
+    tr.onclick = function() { toggleDetail(a.id); };
+    tr.innerHTML = rowHTML(a);
+    tbody.appendChild(tr);
+  });
+}
 
 function updateRow(a) {
-  var tr = document.getElementById('ar-' + a.id);
-  if (!tr) return;
-  tr.innerHTML = rowHTML(a);
-  var isActive = a.status in activeStatuses;
-  tr.className = isActive ? 'row-active' : '';
-  if (isActive) {
-    var tbody = document.getElementById('agent-tbody');
-    var firstInactive = null;
-    for (var i = 0; i < tbody.children.length; i++) {
-      if (!tbody.children[i].classList.contains('row-active')) { firstInactive = tbody.children[i]; break; }
+  var wasTerminal = document.getElementById('ar-' + a.id) && document.getElementById('ar-' + a.id).parentNode && document.getElementById('ar-' + a.id).parentNode.id === 'done-tbody';
+  var isTerminal = a.status in terminalStatuses;
+
+  if (isTerminal && !wasTerminal) {
+    // Moved from active to done — remove from active, re-render done
+    var oldTr = document.getElementById('ar-' + a.id);
+    var oldDetail = document.getElementById('detail-' + a.id);
+    if (oldTr) oldTr.remove();
+    if (oldDetail) oldDetail.remove();
+    document.getElementById('run-done-section').style.display = '';
+    renderDoneTable();
+    // Hide active section if empty
+    if (document.getElementById('active-tbody').children.length === 0) {
+      document.getElementById('run-active-section').style.display = 'none';
     }
-    if (firstInactive && firstInactive !== tr) {
-      var detail = document.getElementById('detail-' + a.id);
-      tbody.insertBefore(tr, firstInactive);
-      if (detail) tbody.insertBefore(detail, tr.nextSibling);
-    }
+  } else if (!isTerminal) {
+    // Still active — update in place
+    var tr = document.getElementById('ar-' + a.id);
+    if (tr) tr.innerHTML = rowHTML(a);
   }
 }
 
@@ -1130,6 +1562,7 @@ function renderDetailMsgs(agentId, msgs) {
 var es = new EventSource('/stream');
 es.addEventListener('init', function(e) {
   var data = JSON.parse(e.data);
+  if (data.runTypes) { for (var k in data.runTypes) runTestTypes[k] = data.runTypes[k]; }
   data.agents.forEach(function(a) { agents[a.id] = a; ensureRow(a); });
   if (data.progress) updateProgress(data.progress);
 });
@@ -1141,6 +1574,7 @@ es.addEventListener('event', function(e) {
     if (a) { a.status = ev.data.status; if (ev.data.error) a.error = ev.data.error; if (['done','connected','failed'].includes(a.status)) a.finishedAt = Date.now(); updateRow(a); }
   }
   if (ev.event === 'agent-registered') { var a = agents[ev.data.agentId]; if (a) a.gitlabUrl = ev.data.gitlabUrl; }
+  if (ev.event === 'agent-progress') { var a = agents[ev.data.agentId]; if (a) { a.progress = ev.data.progress; updateRow(a); } }
   if (ev.event === 'agent-message') {
     var a = agents[ev.data.agentId];
     if (a) {
@@ -1160,15 +1594,23 @@ es.addEventListener('event', function(e) {
     else if (looping) { document.getElementById('ctrl-status').textContent = 'Looping — next run starting...'; }
   }
   if (ev.event === 'run-clear') {
-    agents = {}; expandedAgent = null;
-    document.getElementById('agent-tbody').innerHTML = '';
-    document.getElementById('agent-table').style.display = 'none';
+    agents = {}; expandedAgent = null; agentOrder = [];
+    document.getElementById('active-tbody').innerHTML = '';
+    document.getElementById('done-tbody').innerHTML = '';
+    document.getElementById('run-active-section').style.display = 'none';
+    document.getElementById('run-done-section').style.display = 'none';
     document.getElementById('progress-banner').classList.remove('active');
+    hideTestBadge('pg-test-badge');
+    hideTestBadge('run-test-badge');
   }
   if (ev.event === 'run-start') {
     currentRunId = ev.data.runId;
+    currentTestType = ev.data.testType || 'apocalypse-radio';
+    runTestTypes[ev.data.runId] = currentTestType;
     if (runIds.indexOf(ev.data.runId) === -1) runIds.push(ev.data.runId);
     document.getElementById('btn-cancel').style.display = '';
+    showTestBadge('pg-test-badge', currentTestType);
+    showTestBadge('run-test-badge', currentTestType);
   }
   if (ev.event === 'loop-status') setLoopUI(ev.data.looping);
 });
@@ -1185,8 +1627,7 @@ var resColumns = [
   { key: 'params', label: 'Size' },
   { key: 'total', label: 'Runs' },
   { key: 'successRate', label: 'Success Rate' },
-  { key: 'registered', label: 'Registered' },
-  { key: 'authed', label: 'Authed' },
+  { key: 'progress', label: 'Best Progress' },
   { key: 'avgSteps', label: 'Avg Steps' },
   { key: 'avgElapsed', label: 'Avg Time' }
 ];
@@ -1197,9 +1638,41 @@ function sortResults(key) {
   renderResults();
 }
 
+function bestProgress(pb) {
+  if (!pb) return 'none';
+  var ms = currentMilestones;
+  for (var i = ms.length - 1; i >= 0; i--) {
+    if (pb[ms[i]]) return ms[i];
+  }
+  return pb.none ? 'none' : 'none';
+}
+
+function progressSummaryHTML(pb) {
+  if (!pb) return '<span style="color:var(--text-muted)">--</span>';
+  var ms = currentMilestones;
+  var parts = [];
+  for (var i = 0; i < ms.length; i++) {
+    var cnt = pb[ms[i]] || 0;
+    if (cnt > 0) {
+      parts.push('<span style="color:var(--green)" title="'+ms[i].replace(/_/g,' ')+'">'+cnt+'</span>');
+    } else {
+      parts.push('<span style="color:var(--bg-3)">0</span>');
+    }
+  }
+  var noneCnt = pb['none'] || 0;
+  var labels = ms.map(function(m) { return m.replace(/_/g,' ').charAt(0).toUpperCase(); }).join('/');
+  return '<div style="font-size:0.6rem;font-family:var(--mono)">' + parts.join('<span style="color:var(--border)">/</span>') +
+    (noneCnt > 0 ? ' <span style="color:var(--red)" title="no progress">+'+noneCnt+'</span>' : '') +
+    '</div><div style="font-size:0.48rem;color:var(--text-muted);margin-top:1px">'+labels+'</div>';
+}
+
 function loadResults() {
-  fetch('/api/model-stats').then(function(r){return r.json();}).then(function(data) {
-    resultsData = data.map(function(m) { m.successRate = m.total > 0 ? m.done/m.total : 0; return m; });
+  fetch('/api/model-stats' + testTypeParam()).then(function(r){return r.json();}).then(function(data) {
+    resultsData = data.map(function(m) {
+      m.successRate = m.total > 0 ? m.done/m.total : 0;
+      m.bestProgress = bestProgress(m.progressBreakdown);
+      return m;
+    });
     renderResults();
   });
 }
@@ -1210,7 +1683,13 @@ function renderResults() {
   if (!resultsData.length) { wrap.innerHTML = ''; empty.style.display = 'block'; return; }
   empty.style.display = 'none';
   var sorted = resultsData.slice().sort(function(a, b) {
-    var va = a[resSortKey], vb = b[resSortKey];
+    var va, vb;
+    if (resSortKey === 'progress') {
+      va = currentMilestones.indexOf(a.bestProgress || 'none');
+      vb = currentMilestones.indexOf(b.bestProgress || 'none');
+    } else {
+      va = a[resSortKey]; vb = b[resSortKey];
+    }
     if (va == null) va = resSortKey === 'model' ? '' : -1;
     if (vb == null) vb = resSortKey === 'model' ? '' : -1;
     if (typeof va === 'string') { va = va.toLowerCase(); vb = (vb||'').toLowerCase(); }
@@ -1236,46 +1715,138 @@ function renderResults() {
       '<td style="color:var(--text-dim)">'+(m.params?m.params+'B':'?')+'</td>' +
       '<td>'+m.total+'</td>' +
       '<td><div class="rate-bar"><div class="rate-bar-track"><div class="rate-bar-fill" style="width:'+pct+'%;background:'+c+'"></div></div><span class="rate-bar-pct" style="color:'+c+'">'+pct+'%</span></div></td>' +
-      '<td>'+m.registered+'/'+m.total+'</td><td>'+m.authed+'/'+m.total+'</td>' +
+      '<td>'+progressSummaryHTML(m.progressBreakdown)+'</td>' +
       '<td style="color:var(--text-dim)">'+m.avgSteps+'</td><td style="color:var(--text-dim)">'+m.avgElapsed+'s</td></tr>';
   });
   html += '</tbody></table>';
   wrap.innerHTML = html;
 }
 
-function loadHistory() {
-  fetch('/api/runs').then(function(r){return r.json();}).then(function(runs) {
-    var list = document.getElementById('history-list');
-    var empty = document.getElementById('history-empty');
-    if (!runs.length) { list.innerHTML = ''; empty.style.display = 'block'; return; }
-    empty.style.display = 'none';
-    runs.sort(function(a, b) {
-      var aActive = !a.finishedAt ? 1 : 0;
-      var bActive = !b.finishedAt ? 1 : 0;
-      if (aActive !== bActive) return bActive - aActive;
-      return b.startedAt - a.startedAt;
-    });
-    list.innerHTML = runs.map(function(r, i) {
-      var d = new Date(r.startedAt).toLocaleString();
-      var isActive = !r.finishedAt;
-      var dur = '';
-      if (r.finishedAt) {
-        var secs = Math.round((r.finishedAt - r.startedAt) / 1000);
-        if (secs >= 3600) dur = Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
-        else if (secs >= 60) dur = Math.floor(secs/60) + 'm ' + (secs%60) + 's';
-        else dur = secs + 's';
-      } else { dur = 'in progress'; }
-      return '<div class="history-item'+(isActive?' hi-active':'')+'" id="hi-'+i+'">' +
-        '<div class="history-head" onclick="toggleHistory('+i+',\\''+esc(r.id)+'\\')">' +
-        '<div class="history-meta"><span class="run-id">'+esc(r.id)+'</span><span class="run-date">'+d+'</span></div>' +
-        '<div class="history-stats">' +
+var historyRuns = [];
+var histSortKey = 'date';
+var histSortDir = -1;
+var histSortDefs = [
+  { key: 'date', label: 'Date' },
+  { key: 'pass', label: 'Pass' },
+  { key: 'fail', label: 'Fail' },
+  { key: 'duration', label: 'Duration' }
+];
+
+function renderHistorySortBar() {
+  var bar = document.getElementById('history-sort-bar');
+  bar.innerHTML = '<span style="font-size:0.55rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;padding:4px 4px;align-self:center">Sort by:</span>' +
+    histSortDefs.map(function(d) {
+      var active = histSortKey === d.key;
+      var arrow = active ? (histSortDir === 1 ? '&#9650;' : '&#9660;') : '&#9650;';
+      return '<button class="history-sort-btn'+(active?' sort-active':'')+'" onclick="sortHistory(\\''+d.key+'\\')">'+d.label+'<span class="sort-arrow">'+arrow+'</span></button>';
+    }).join('');
+}
+
+function sortHistory(key) {
+  if (histSortKey === key) histSortDir *= -1;
+  else { histSortKey = key; histSortDir = -1; }
+  renderHistorySortBar();
+  renderCompletedRuns();
+}
+
+function histSortVal(r, key) {
+  if (key === 'date') return r.startedAt;
+  if (key === 'pass') return r.totalDone;
+  if (key === 'fail') return r.totalFailed;
+  if (key === 'duration') return r.finishedAt ? (r.finishedAt - r.startedAt) : 0;
+  return 0;
+}
+
+function fmtDuration(r) {
+  if (!r.finishedAt) return 'in progress';
+  var secs = Math.round((r.finishedAt - r.startedAt) / 1000);
+  if (secs >= 3600) return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
+  if (secs >= 60) return Math.floor(secs/60) + 'm ' + (secs%60) + 's';
+  return secs + 's';
+}
+
+function historyItemHTML(r, idx) {
+  var d = new Date(r.startedAt).toLocaleString();
+  var isActive = !r.finishedAt;
+  var dur = fmtDuration(r);
+  var pulse = isActive ? '<span class="hi-pulse-dot"></span>' : '';
+  return '<div class="history-item'+(isActive?' hi-active':'')+'" id="hi-'+idx+'" data-run-id="'+esc(r.id)+'">' +
+    '<div class="history-head" onclick="toggleHistory('+idx+',\\''+esc(r.id)+'\\')">' +
+    '<div class="history-meta">'+pulse+'<span class="run-id">'+esc(r.id)+'</span>'+(r.testType ? '<span class="test-type-badge tt-'+esc(r.testType)+'">'+esc(r.testType)+'</span>' : '')+'<span class="run-date">'+d+'</span></div>' +
+    '<div class="history-stats">' +
+      '<span class="hs-ok">'+r.totalDone+' done</span>' +
+      '<span class="hs-fail">'+r.totalFailed+' failed</span>' +
+      '<span>/'+r.agentCount+' total</span>' +
+      '<span style="color:var(--text-dim);margin-left:4px">'+dur+'</span>' +
+    '</div></div>' +
+    '<div class="history-body" id="hb-'+idx+'"></div></div>';
+}
+
+function renderActiveRuns() {
+  var activeRuns = historyRuns.filter(function(r) { return !r.finishedAt; });
+  var section = document.getElementById('history-active-section');
+  var list = document.getElementById('history-active-list');
+  if (!activeRuns.length) { section.style.display = 'none'; return; }
+  section.style.display = '';
+  // Preserve expanded state: only update headers of existing items, don't recreate
+  var existingIds = {};
+  list.querySelectorAll('.history-item').forEach(function(el) { existingIds[el.dataset.runId] = el; });
+  activeRuns.forEach(function(r) {
+    var idx = historyRuns.indexOf(r);
+    var existing = existingIds[r.id];
+    if (existing) {
+      // Update only the head stats, not the body (prevents shifting)
+      var head = existing.querySelector('.history-head');
+      if (head) {
+        var d = new Date(r.startedAt).toLocaleString();
+        head.querySelector('.history-stats').innerHTML =
           '<span class="hs-ok">'+r.totalDone+' done</span>' +
           '<span class="hs-fail">'+r.totalFailed+' failed</span>' +
           '<span>/'+r.agentCount+' total</span>' +
-          '<span style="color:var(--text-dim);margin-left:4px">'+dur+'</span>' +
-        '</div></div>' +
-        '<div class="history-body" id="hb-'+i+'"></div></div>';
-    }).join('');
+          '<span style="color:var(--text-dim);margin-left:4px">'+fmtDuration(r)+'</span>';
+      }
+      delete existingIds[r.id];
+    } else {
+      var div = document.createElement('div');
+      div.innerHTML = historyItemHTML(r, idx);
+      list.appendChild(div.firstChild);
+    }
+  });
+  // Remove items that are no longer active
+  Object.values(existingIds).forEach(function(el) { el.remove(); });
+}
+
+function renderCompletedRuns() {
+  var completed = historyRuns.filter(function(r) { return !!r.finishedAt; });
+  var section = document.getElementById('history-completed-section');
+  var list = document.getElementById('history-completed-list');
+  if (!completed.length) { section.style.display = 'none'; return; }
+  section.style.display = '';
+  completed.sort(function(a, b) {
+    var va = histSortVal(a, histSortKey), vb = histSortVal(b, histSortKey);
+    if (va < vb) return -1 * histSortDir;
+    if (va > vb) return 1 * histSortDir;
+    return 0;
+  });
+  list.innerHTML = completed.map(function(r) {
+    return historyItemHTML(r, historyRuns.indexOf(r));
+  }).join('');
+}
+
+function loadHistory() {
+  fetch('/api/runs' + testTypeParam()).then(function(r){return r.json();}).then(function(runs) {
+    var empty = document.getElementById('history-empty');
+    if (!runs.length) {
+      document.getElementById('history-active-section').style.display = 'none';
+      document.getElementById('history-completed-section').style.display = 'none';
+      empty.style.display = 'block';
+      return;
+    }
+    empty.style.display = 'none';
+    historyRuns = runs;
+    renderHistorySortBar();
+    renderActiveRuns();
+    renderCompletedRuns();
   });
 }
 
@@ -1283,11 +1854,11 @@ function toggleHistory(idx, runId) {
   var body = document.getElementById('hb-' + idx);
   if (body.classList.contains('open')) { body.classList.remove('open'); return; }
   if (body.dataset.loaded) { body.classList.add('open'); return; }
-  body.innerHTML = '<div style="padding:8px;color:var(--text-dim)">Loading...</div>';
+  body.innerHTML = '<div class="history-body-inner"><div style="padding:8px;color:var(--text-dim)">Loading...</div></div>';
   body.classList.add('open');
   fetch('/api/runs/' + runId).then(function(r){return r.json();}).then(function(data) {
     body.dataset.loaded = '1';
-    body.innerHTML = data.agents.map(function(r) {
+    body.innerHTML = '<div class="history-body-inner">' + data.agents.map(function(r) {
       var cls = (r.status==='done'||r.status==='connected') ? 'ha-done' : 'ha-failed';
       var elapsed = r.finishedAt ? ((r.finishedAt - r.startedAt)/1000).toFixed(1) : '?';
       return '<div class="history-agent '+cls+'">' +
@@ -1295,6 +1866,7 @@ function toggleHistory(idx, runId) {
         '<span class="badge badge-'+r.status+'">'+r.status+'</span></div>' +
         '<div class="ha-model">'+esc(r.model)+'</div>' +
         '<div class="ha-detail">' +
+          (r.progress ? '<span style="color:var(--cyan)">'+r.progress.replace(/_/g,' ')+'</span> &middot; ' : '') +
           (r.gitlabUrl ? '<a href="'+r.gitlabUrl+'" target="_blank">'+esc(r.gitlabUrl)+'</a> &middot; ' : '') +
           elapsed+'s &middot; '+r.stepCount+' cmds' +
           (r.gameToken ? ' &middot; <span style="color:var(--green)">has token</span>' : '') +
@@ -1302,7 +1874,7 @@ function toggleHistory(idx, runId) {
         '</div>' +
         '<span class="ha-msgs-toggle" data-agent="'+esc(r.id)+'" onclick="event.stopPropagation();toggleAgentMsgs(this)">Show messages</span>' +
         '<div class="ha-msgs" id="hm-'+esc(r.id)+'"></div></div>';
-    }).join('');
+    }).join('') + '</div>';
   });
 }
 
@@ -1321,29 +1893,87 @@ function toggleAgentMsgs(el) {
   });
 }
 
+var expData = [];
+
+function patchExp(id, fields) {
+  fields.id = id;
+  fetch('/api/experiments', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(fields) });
+}
+
+function expDescBlur(el) {
+  var id = parseInt(el.dataset.id);
+  patchExp(id, { description: el.value });
+  var row = expData.find(function(r) { return r.id === id; });
+  if (row) row.description = el.value;
+  el.style.borderColor = 'var(--green)';
+  setTimeout(function() { el.style.borderColor = ''; }, 800);
+}
+
+function expStatusToggle(id) {
+  var row = expData.find(function(r) { return r.id === id; });
+  if (!row) return;
+  var next = row.status === 'keep' ? 'discard' : row.status === 'discard' ? 'crash' : 'keep';
+  row.status = next;
+  patchExp(id, { status: next });
+  renderExp();
+}
+
+function delExperiment(id) {
+  if (!confirm('Delete experiment #' + id + '?')) return;
+  fetch('/api/experiments', { method: 'DELETE', headers: {'Content-Type':'application/json'}, body: JSON.stringify({id: id}) })
+    .then(function() { loadExperiments(); });
+}
+
 function loadExperiments() {
-  fetch('/api/experiments').then(function(r){return r.json();}).then(function(rows) {
-    var table = document.getElementById('exp-table');
-    var tbody = document.getElementById('exp-tbody');
-    var empty = document.getElementById('exp-empty');
-    if (!rows.length) { table.style.display='none'; empty.style.display=''; return; }
-    table.style.display=''; empty.style.display='none';
-    tbody.innerHTML = rows.map(function(r) {
-      var statusColor = r.status === 'keep' ? 'var(--green)' : r.status === 'discard' ? 'var(--red)' : 'var(--amber)';
-      var pr = r.pass_rate || '';
-      var nums = pr.match(/(\d+)\/(\d+)/);
-      var pct = nums ? Math.round(parseInt(nums[1])/parseInt(nums[2])*100) : 0;
-      var barColor = pct >= 30 ? 'var(--green)' : pct >= 15 ? 'var(--amber)' : 'var(--red)';
-      return '<tr>' +
-        '<td style="color:var(--text-dim)">' + esc(r._index) + '</td>' +
-        '<td style="font-family:var(--mono);font-size:0.65rem;color:var(--cyan)">' + esc(r.commit || '') + '</td>' +
-        '<td><div style="display:flex;align-items:center;gap:6px"><div style="width:40px;height:6px;background:var(--bg-0);border-radius:3px;overflow:hidden"><div style="width:'+pct+'%;height:100%;background:'+barColor+';border-radius:3px"></div></div><span style="font-size:0.7rem;font-weight:600">' + esc(pr) + '</span></div></td>' +
-        '<td style="font-size:0.65rem;color:var(--text-dim)">' + (r.elapsed_sec ? Math.round(r.elapsed_sec/60)+'m' : '') + '</td>' +
-        '<td style="color:'+statusColor+';font-size:0.65rem;font-weight:600;text-transform:uppercase">' + esc(r.status || '') + '</td>' +
-        '<td style="font-size:0.62rem;color:var(--text);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(r.description || '')+'">' + esc(r.description || '') + '</td>' +
-        '</tr>';
-    }).join('');
+  fetch('/api/experiments' + testTypeParam()).then(function(r){return r.json();}).then(function(rows) {
+    expData = rows;
+    renderExp();
   });
+}
+
+function renderExp() {
+  var wrap = document.getElementById('exp-wrap');
+  var empty = document.getElementById('exp-empty');
+  if (!expData.length) { wrap.innerHTML = ''; empty.style.display = ''; return; }
+  empty.style.display = 'none';
+
+  // Find best pass rate
+  var best = 0;
+  expData.forEach(function(r) { if (r.status === 'keep' && r.total > 0 && r.passed / r.total > best) best = r.passed / r.total; });
+
+  var html = '<div class="summary-count"><strong>' + expData.length + '</strong> experiments</div>';
+  html += '<table class="results-table"><thead><tr>';
+  html += '<th>#</th><th>Commit</th><th>What Changed</th><th>Pass Rate</th><th>Status</th><th>Run</th><th>Date</th><th></th>';
+  html += '</tr></thead><tbody>';
+
+  expData.forEach(function(r, i) {
+    var pct = r.total > 0 ? Math.round(r.passed / r.total * 100) : 0;
+    var c = pct >= 80 ? 'var(--green)' : pct >= 40 ? 'var(--amber)' : 'var(--red)';
+    if (r.status === 'crash') c = 'var(--red)';
+    if (r.status === 'discard') c = 'var(--amber)';
+    var isBest = r.status === 'keep' && r.total > 0 && r.passed / r.total === best && best > 0;
+    var d = new Date(r.createdAt).toLocaleDateString();
+    var statusCls = 'exp-status-' + r.status;
+    var commitDisplay = r.commitHash ? esc(r.commitHash.substring(0, 7)) : '<span style="color:var(--text-muted)">--</span>';
+    var rowStyle = r.status === 'discard' ? 'opacity:0.5;' : '';
+    if (isBest) rowStyle += 'background:rgba(0,255,100,0.04);';
+
+    html += '<tr style="'+rowStyle+'">' +
+      '<td style="color:var(--text-dim)">'+(i+1)+'</td>' +
+      '<td style="font-family:var(--mono);font-size:0.65rem;color:var(--cyan)">'+commitDisplay+'</td>' +
+      '<td style="min-width:200px;max-width:360px"><input class="exp-input" value="'+esc(r.description)+'" placeholder="what changed\u2026" data-id="'+r.id+'" onblur="expDescBlur(this)" style="width:100%" /></td>' +
+      '<td>' + (r.total > 0 ?
+        '<div class="rate-bar"><div class="rate-bar-track"><div class="rate-bar-fill" style="width:'+pct+'%;background:'+c+'"></div></div>' +
+        '<span class="rate-bar-pct" style="color:'+c+'">'+r.passed+'/'+r.total+'</span></div>' :
+        '<span style="color:var(--text-muted)">--</span>') + '</td>' +
+      '<td><span class="'+statusCls+'" style="font-size:0.65rem;font-weight:600;cursor:pointer" onclick="expStatusToggle('+r.id+')" title="Click to toggle">'+r.status+'</span></td>' +
+      '<td style="font-size:0.62rem;color:var(--cyan)">'+(r.runId ? esc(r.runId) : '<span style="color:var(--text-muted)">--</span>')+'</td>' +
+      '<td style="font-size:0.62rem;color:var(--text-dim)">'+d+'</td>' +
+      '<td class="exp-row-actions"><button class="exp-action-btn" onclick="delExperiment('+r.id+')">del</button></td>' +
+      '</tr>';
+  });
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
 }
 </script>
 </body>
@@ -1384,7 +2014,8 @@ const httpServer = createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "Access-Control-Allow-Origin": "*" });
     const allAgents = Array.from(agents.values());
     const progress = activeRuns.size > 0 ? getAggregateProgress() : null;
-    res.write(`event: init\ndata: ${JSON.stringify({ agents: allAgents, progress })}\n\n`);
+    const runTypes = Object.fromEntries(runTestTypeMap);
+    res.write(`event: init\ndata: ${JSON.stringify({ agents: allAgents, progress, runTypes })}\n\n`);
     const onEvent = (ev: unknown) => { res.write(`event: event\ndata: ${JSON.stringify(ev)}\n\n`); };
     bus.on("event", onEvent);
     const hb = setInterval(() => res.write(`: hb\n\n`), 10000);
@@ -1397,8 +2028,9 @@ const httpServer = createServer(async (req, res) => {
       const body = JSON.parse(await readBody(req));
       const count = Math.min(Math.max(Number(body.agents) || 1, 1), 10);
       const model = body.model || undefined;
-      const runId = await launchRun(count, model);
-      jsonRes(res, 200, { ok: true, runId, count });
+      const testConfig = TEST_CONFIGS[body.test_type] || ACTIVE_TEST_CONFIG;
+      const runId = await launchRun(count, model, testConfig);
+      jsonRes(res, 200, { ok: true, runId, count, testType: testConfig.name });
     } catch (err) {
       jsonRes(res, 400, { error: (err as Error).message });
     }
@@ -1410,8 +2042,9 @@ const httpServer = createServer(async (req, res) => {
       const raw = req.headers["content-length"] && Number(req.headers["content-length"]) > 0 ? await readBody(req) : "";
       const body = raw ? JSON.parse(raw) : {};
       const concurrency = Math.min(Math.max(Number(body.concurrency) || 5, 1), 10);
-      const runId = await launchAllModels(concurrency);
-      jsonRes(res, 200, { ok: true, runId, modelCount: TOOL_MODELS.length });
+      const testConfig = TEST_CONFIGS[body.test_type] || ACTIVE_TEST_CONFIG;
+      const runId = await launchAllModels(concurrency, testConfig);
+      jsonRes(res, 200, { ok: true, runId, modelCount: TOOL_MODELS.length, testType: testConfig.name });
     } catch (err) {
       jsonRes(res, 400, { error: (err as Error).message });
     }
@@ -1427,10 +2060,13 @@ const httpServer = createServer(async (req, res) => {
   }
 
   if (url.pathname === "/api/start-loop" && req.method === "POST") {
+    const raw = req.headers["content-length"] && Number(req.headers["content-length"]) > 0 ? await readBody(req) : "";
+    const body = raw ? JSON.parse(raw) : {};
+    const testConfig = TEST_CONFIGS[body.test_type] || ACTIVE_TEST_CONFIG;
     loopMode = true;
     emit("loop-status", { looping: true });
     if (activeRuns.size === 0) {
-      const runId = await launchAllModels(5);
+      const runId = await launchAllModels(5, testConfig);
       jsonRes(res, 200, { ok: true, looping: true, runId });
     } else {
       jsonRes(res, 200, { ok: true, looping: true, message: "Will continue after current run" });
@@ -1446,7 +2082,8 @@ const httpServer = createServer(async (req, res) => {
   }
 
   if (url.pathname === "/api/runs" && req.method === "GET") {
-    jsonRes(res, 200, listRuns());
+    const testTypeFilter = url.searchParams.get("test_type") || undefined;
+    jsonRes(res, 200, listRuns(50, testTypeFilter));
     return;
   }
 
@@ -1465,11 +2102,13 @@ const httpServer = createServer(async (req, res) => {
   }
 
   if (url.pathname === "/api/model-stats" && req.method === "GET") {
-    const stats = listModelStats();
+    const testTypeFilter = url.searchParams.get("test_type") || undefined;
+    const stats = listModelStats(testTypeFilter);
+    const progressMap = listProgressBreakdown(testTypeFilter);
     const paramMapLocal: Record<string, number | null> = {};
     TOOL_MODELS.forEach(function(m) { paramMapLocal[m.id] = m.active_params_b; });
     const enriched = stats.map(function(s) {
-      return { ...s, params: paramMapLocal[s.model] || null };
+      return { ...s, params: paramMapLocal[s.model] || null, progressBreakdown: progressMap[s.model] || {} };
     });
     jsonRes(res, 200, enriched);
     return;
@@ -1481,22 +2120,67 @@ const httpServer = createServer(async (req, res) => {
   }
 
   if (url.pathname === "/api/experiments" && req.method === "GET") {
-    try {
-      const tsvPath = resolve(__dirname, "../results.tsv");
-      const tsv = readFileSync(tsvPath, "utf-8");
-      const lines = tsv.trim().split("\n");
-      const header = lines[0]?.split("\t") || [];
-      const rows = lines.slice(1).map((line, i) => {
-        const cols = line.split("\t");
-        const obj: Record<string, string> = {};
-        header.forEach((h, j) => { obj[h] = cols[j] || ""; });
-        obj._index = String(i + 1);
-        return obj;
-      });
-      jsonRes(res, 200, rows);
-    } catch {
-      jsonRes(res, 200, []);
-    }
+    const testTypeFilter = url.searchParams.get("test_type") || undefined;
+    const rows = listExperiments(testTypeFilter);
+    jsonRes(res, 200, rows);
+    return;
+  }
+
+  if (url.pathname === "/api/experiments" && req.method === "POST") {
+    const body = JSON.parse(await readBody(req));
+    const id = insertExperiment({
+      commitHash: body.commit_hash || undefined,
+      testType: body.test_type || ACTIVE_TEST_CONFIG.name,
+      description: body.description || "",
+      status: body.status || "keep",
+      passRate: body.pass_rate || undefined,
+      passed: body.passed || 0,
+      failed: body.failed || 0,
+      total: body.total || 0,
+      runId: body.run_id || undefined,
+    });
+    jsonRes(res, 200, { ok: true, id });
+    return;
+  }
+
+  if (url.pathname === "/api/experiments" && req.method === "PUT") {
+    const body = JSON.parse(await readBody(req));
+    if (!body.id) { jsonRes(res, 400, { error: "id required" }); return; }
+    updateExperiment(body.id, {
+      commitHash: body.commit_hash,
+      description: body.description,
+      status: body.status,
+      passRate: body.pass_rate,
+      passed: body.passed,
+      failed: body.failed,
+      total: body.total,
+      runId: body.run_id,
+    });
+    jsonRes(res, 200, { ok: true });
+    return;
+  }
+
+  if (url.pathname === "/api/experiments" && req.method === "DELETE") {
+    const body = JSON.parse(await readBody(req));
+    if (!body.id) { jsonRes(res, 400, { error: "id required" }); return; }
+    deleteExperiment(body.id);
+    jsonRes(res, 200, { ok: true });
+    return;
+  }
+
+  if (url.pathname === "/api/completed-runs" && req.method === "GET") {
+    const testTypeFilter = url.searchParams.get("test_type") || undefined;
+    const runs = listRuns(100, testTypeFilter).filter(r => r.finishedAt);
+    const rows = runs.map((r) => ({
+      id: r.id,
+      test_type: r.testType,
+      pass_rate: r.totalDone + "/" + r.agentCount,
+      passed: r.totalDone,
+      failed: r.totalFailed,
+      total: r.agentCount,
+      date: new Date(r.startedAt).toISOString(),
+    }));
+    jsonRes(res, 200, rows);
     return;
   }
 
@@ -1508,20 +2192,22 @@ const httpServer = createServer(async (req, res) => {
 async function main() {
   const dbPath = resolve(__dirname, "../pi-test-results.db");
   initDb(dbPath);
+  migrateSchema();
   console.log(`  DB: ${dbPath}`);
 
   const orphaned = cleanupOrphanedRuns();
   if (orphaned > 0) console.log(`  Cleaned up ${orphaned} orphaned run(s).`);
 
   console.log(`  ${TOOL_MODELS.length} tool-calling models loaded.`);
+  console.log(`  Test type: ${ACTIVE_TEST_CONFIG.name}`);
 
   httpServer.listen(DASHBOARD_PORT, () => {
     console.log(`\n  Pi Agent Test Lab — http://localhost:${DASHBOARD_PORT}/\n`);
   });
 
   if (AUTO_ALL) {
-    console.log(`  Auto-launching all ${TOOL_MODELS.length} models...`);
-    await launchAllModels();
+    console.log(`  Auto-launching all ${TOOL_MODELS.length} models (${ACTIVE_TEST_CONFIG.name})...`);
+    await launchAllModels(5, ACTIVE_TEST_CONFIG);
   }
 }
 

@@ -23,7 +23,9 @@ const SCHEMA = `
     model_filter  TEXT,
     agent_count   INTEGER NOT NULL,
     total_done    INTEGER NOT NULL DEFAULT 0,
-    total_failed  INTEGER NOT NULL DEFAULT 0
+    total_failed  INTEGER NOT NULL DEFAULT 0,
+    test_type     TEXT NOT NULL DEFAULT 'apocalypse-radio',
+    notes         TEXT
   );
 
   CREATE TABLE IF NOT EXISTS agents (
@@ -38,7 +40,8 @@ const SCHEMA = `
     game_token    TEXT,
     started_at    INTEGER NOT NULL,
     finished_at   INTEGER,
-    step_count    INTEGER NOT NULL DEFAULT 0
+    step_count    INTEGER NOT NULL DEFAULT 0,
+    progress      TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_agents_run ON agents(run_id);
   CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
@@ -52,6 +55,20 @@ const SCHEMA = `
     timestamp     INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_messages_agent ON messages(agent_id);
+
+  CREATE TABLE IF NOT EXISTS experiments (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    commit_hash   TEXT,
+    test_type     TEXT NOT NULL DEFAULT 'apocalypse-radio',
+    description   TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'keep',
+    pass_rate     TEXT,
+    passed        INTEGER NOT NULL DEFAULT 0,
+    failed        INTEGER NOT NULL DEFAULT 0,
+    total         INTEGER NOT NULL DEFAULT 0,
+    run_id        TEXT REFERENCES runs(id),
+    created_at    INTEGER NOT NULL
+  );
 `;
 
 // ── Init ────────────────────────────────────────────────────
@@ -69,10 +86,11 @@ export function insertRun(run: {
   modelFilter: string;
   agentCount: number;
   startedAt: number;
+  testType?: string;
 }): void {
   db.prepare(
-    `INSERT INTO runs (id, started_at, game_server, model_filter, agent_count) VALUES (?, ?, ?, ?, ?)`,
-  ).run(run.id, run.startedAt, run.gameServer, run.modelFilter, run.agentCount);
+    `INSERT INTO runs (id, started_at, game_server, model_filter, agent_count, test_type) VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(run.id, run.startedAt, run.gameServer, run.modelFilter, run.agentCount, run.testType || "apocalypse-radio");
 }
 
 export function finishRun(runId: string): void {
@@ -86,6 +104,10 @@ export function finishRun(runId: string): void {
   db.prepare(
     `UPDATE runs SET finished_at = ?, total_done = ?, total_failed = ? WHERE id = ?`,
   ).run(Date.now(), counts.done || 0, counts.failed || 0, runId);
+}
+
+export function updateRunNotes(runId: string, notes: string): void {
+  db.prepare(`UPDATE runs SET notes = ? WHERE id = ?`).run(notes, runId);
 }
 
 /** Mark orphaned runs (no finished_at) and their stuck agents as finished */
@@ -138,6 +160,10 @@ export function incrementAgentSteps(agentId: string): void {
   db.prepare(`UPDATE agents SET step_count = step_count + 1 WHERE id = ?`).run(agentId);
 }
 
+export function updateAgentProgress(agentId: string, progress: string): void {
+  db.prepare(`UPDATE agents SET progress = ? WHERE id = ?`).run(progress, agentId);
+}
+
 export function insertMessage(msg: {
   agentId: string;
   role: string;
@@ -160,13 +186,19 @@ export interface RunSummary {
   agentCount: number;
   totalDone: number;
   totalFailed: number;
+  testType: string;
+  notes: string | null;
 }
 
-export function listRuns(limit = 50): RunSummary[] {
+export function listRuns(limit = 50, testType?: string): RunSummary[] {
+  const query = testType
+    ? `SELECT * FROM runs WHERE test_type = ? ORDER BY started_at DESC LIMIT ?`
+    : `SELECT * FROM runs ORDER BY started_at DESC LIMIT ?`;
+  const params = testType ? [testType, limit] : [limit];
   return (
     db
-      .prepare(`SELECT * FROM runs ORDER BY started_at DESC LIMIT ?`)
-      .all(limit) as {
+      .prepare(query)
+      .all(...params) as {
       id: string;
       started_at: number;
       finished_at: number | null;
@@ -175,6 +207,8 @@ export function listRuns(limit = 50): RunSummary[] {
       agent_count: number;
       total_done: number;
       total_failed: number;
+      test_type: string;
+      notes: string | null;
     }[]
   ).map((r) => ({
     id: r.id,
@@ -185,6 +219,8 @@ export function listRuns(limit = 50): RunSummary[] {
     agentCount: r.agent_count,
     totalDone: r.total_done,
     totalFailed: r.total_failed,
+    testType: r.test_type,
+    notes: r.notes,
   }));
 }
 
@@ -201,6 +237,7 @@ export interface AgentRow {
   startedAt: number;
   finishedAt: number | null;
   stepCount: number;
+  progress: string | null;
 }
 
 function mapAgent(r: Record<string, unknown>): AgentRow {
@@ -217,6 +254,7 @@ function mapAgent(r: Record<string, unknown>): AgentRow {
     startedAt: r.started_at as number,
     finishedAt: r.finished_at as number | null,
     stepCount: r.step_count as number,
+    progress: r.progress as string | null,
   };
 }
 
@@ -294,24 +332,46 @@ export interface ModelStats {
   avgElapsed: number;
 }
 
-export function listModelStats(): ModelStats[] {
+// ── Schema migrations ───────────────────────────────────────
+
+export function migrateSchema(): void {
+  // Add test_type column if it doesn't exist (for existing DBs)
+  const cols = db.prepare(`PRAGMA table_info(runs)`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === "test_type")) {
+    db.exec(`ALTER TABLE runs ADD COLUMN test_type TEXT NOT NULL DEFAULT 'apocalypse-radio'`);
+  }
+  if (!cols.some((c) => c.name === "notes")) {
+    db.exec(`ALTER TABLE runs ADD COLUMN notes TEXT`);
+  }
+  const agentCols = db.prepare(`PRAGMA table_info(agents)`).all() as { name: string }[];
+  if (!agentCols.some((c) => c.name === "progress")) {
+    db.exec(`ALTER TABLE agents ADD COLUMN progress TEXT`);
+  }
+}
+
+export function listModelStats(testType?: string): ModelStats[] {
+  const whereClause = testType
+    ? `WHERE a.run_id IN (SELECT id FROM runs WHERE test_type = ?)`
+    : ``;
+  const params = testType ? [testType] : [];
   return (
     db
       .prepare(
         `SELECT
-           model,
+           a.model,
            COUNT(*) as total,
-           SUM(CASE WHEN status IN ('done','connected') THEN 1 ELSE 0 END) as done,
-           SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
-           SUM(CASE WHEN gitlab_url IS NOT NULL THEN 1 ELSE 0 END) as registered,
-           SUM(CASE WHEN game_token IS NOT NULL THEN 1 ELSE 0 END) as authed,
-           AVG(step_count) as avg_steps,
-           AVG(CASE WHEN finished_at IS NOT NULL THEN (finished_at - started_at) / 1000.0 ELSE NULL END) as avg_elapsed
-         FROM agents
-         GROUP BY model
+           SUM(CASE WHEN a.status IN ('done','connected') THEN 1 ELSE 0 END) as done,
+           SUM(CASE WHEN a.status = 'failed' THEN 1 ELSE 0 END) as failed,
+           SUM(CASE WHEN a.gitlab_url IS NOT NULL THEN 1 ELSE 0 END) as registered,
+           SUM(CASE WHEN a.game_token IS NOT NULL THEN 1 ELSE 0 END) as authed,
+           AVG(a.step_count) as avg_steps,
+           AVG(CASE WHEN a.finished_at IS NOT NULL THEN (a.finished_at - a.started_at) / 1000.0 ELSE NULL END) as avg_elapsed
+         FROM agents a
+         ${whereClause}
+         GROUP BY a.model
          ORDER BY total DESC`,
       )
-      .all() as Record<string, unknown>[]
+      .all(...params) as Record<string, unknown>[]
   ).map((r) => ({
     model: r.model as string,
     total: r.total as number,
@@ -321,6 +381,113 @@ export function listModelStats(): ModelStats[] {
     authed: r.authed as number,
     avgSteps: Math.round((r.avg_steps as number) * 10) / 10,
     avgElapsed: Math.round((r.avg_elapsed as number || 0) * 10) / 10,
+  }));
+}
+
+export function listProgressBreakdown(testType?: string): Record<string, Record<string, number>> {
+  const whereClause = testType
+    ? `WHERE a.run_id IN (SELECT id FROM runs WHERE test_type = ?)`
+    : ``;
+  const params = testType ? [testType] : [];
+  const rows = db.prepare(
+    `SELECT a.model, COALESCE(a.progress, 'none') as progress, COUNT(*) as cnt
+     FROM agents a ${whereClause}
+     GROUP BY a.model, a.progress
+     ORDER BY a.model`,
+  ).all(...params) as { model: string; progress: string; cnt: number }[];
+
+  const result: Record<string, Record<string, number>> = {};
+  for (const r of rows) {
+    if (!result[r.model]) result[r.model] = {};
+    result[r.model][r.progress] = r.cnt;
+  }
+  return result;
+}
+
+// ── Experiments ──────────────────────────────────────────────
+
+export interface ExperimentRow {
+  id: number;
+  commitHash: string | null;
+  testType: string;
+  description: string;
+  status: string;
+  passRate: string | null;
+  passed: number;
+  failed: number;
+  total: number;
+  runId: string | null;
+  createdAt: number;
+}
+
+export function insertExperiment(exp: {
+  commitHash?: string;
+  testType: string;
+  description: string;
+  status?: string;
+  passRate?: string;
+  passed?: number;
+  failed?: number;
+  total?: number;
+  runId?: string;
+}): number {
+  const result = db.prepare(
+    `INSERT INTO experiments (commit_hash, test_type, description, status, pass_rate, passed, failed, total, run_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    exp.commitHash || null, exp.testType, exp.description, exp.status || "keep",
+    exp.passRate || null, exp.passed || 0, exp.failed || 0, exp.total || 0,
+    exp.runId || null, Date.now(),
+  );
+  return Number(result.lastInsertRowid);
+}
+
+export function updateExperiment(id: number, fields: {
+  commitHash?: string;
+  description?: string;
+  status?: string;
+  passRate?: string;
+  passed?: number;
+  failed?: number;
+  total?: number;
+  runId?: string;
+}): void {
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  if (fields.commitHash !== undefined) { sets.push("commit_hash = ?"); vals.push(fields.commitHash); }
+  if (fields.description !== undefined) { sets.push("description = ?"); vals.push(fields.description); }
+  if (fields.status !== undefined) { sets.push("status = ?"); vals.push(fields.status); }
+  if (fields.passRate !== undefined) { sets.push("pass_rate = ?"); vals.push(fields.passRate); }
+  if (fields.passed !== undefined) { sets.push("passed = ?"); vals.push(fields.passed); }
+  if (fields.failed !== undefined) { sets.push("failed = ?"); vals.push(fields.failed); }
+  if (fields.total !== undefined) { sets.push("total = ?"); vals.push(fields.total); }
+  if (fields.runId !== undefined) { sets.push("run_id = ?"); vals.push(fields.runId); }
+  if (!sets.length) return;
+  vals.push(id);
+  db.prepare(`UPDATE experiments SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+}
+
+export function deleteExperiment(id: number): void {
+  db.prepare(`DELETE FROM experiments WHERE id = ?`).run(id);
+}
+
+export function listExperiments(testType?: string): ExperimentRow[] {
+  const query = testType
+    ? `SELECT * FROM experiments WHERE test_type = ? ORDER BY id ASC`
+    : `SELECT * FROM experiments ORDER BY id ASC`;
+  const params = testType ? [testType] : [];
+  return (db.prepare(query).all(...params) as Record<string, unknown>[]).map((r) => ({
+    id: r.id as number,
+    commitHash: r.commit_hash as string | null,
+    testType: r.test_type as string,
+    description: r.description as string,
+    status: r.status as string,
+    passRate: r.pass_rate as string | null,
+    passed: r.passed as number,
+    failed: r.failed as number,
+    total: r.total as number,
+    runId: r.run_id as string | null,
+    createdAt: r.created_at as number,
   }));
 }
 
