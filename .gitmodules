@@ -1,0 +1,3 @@
+[submodule "sanity-harness"]
+	path = sanity-harness
+	url = https://github.com/lemon07r/SanityHarness.git
