@@ -70,12 +70,16 @@ python3 -c '
 import json
 d = json.load(open("/tmp/pat_resp.json"))
 t = d.get("new_token", "")
-open("/tmp/gl_pat.txt", "w").write(t)
-print(t)
+if t:
+    open("/tmp/gl_pat.txt", "w").write(t)
+    print("PAT: " + t)
+else:
+    print("ERROR: PAT creation failed. Response: " + json.dumps(d))
+    print("Re-run Steps 1-2 with a new username, then retry Step 3.")
 '
 ```
 
-If you get 422, the session expired. Re-run Steps 1-2 with a new username, then retry Step 3 immediately.
+The output should show `PAT: glpat-...`. If it shows ERROR, re-run Steps 1-2 with a fresh username and retry Step 3 immediately.
 
 ## Step 4: Generate SSH key and add to GitLab
 
