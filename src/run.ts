@@ -43,6 +43,7 @@ config({ path: resolve(__dirname, "../.env") });
 // ── Config ──────────────────────────────────────────────────
 
 const NIM_API_KEY = process.env.NVIDIA_NIM_API_KEY;
+const HF_API_KEY = process.env.HF_TOKEN || process.env.HUGGINGFACE_TOKEN || process.env.HUGGING_FACE_POLATS;
 const DASHBOARD_PORT = Number(process.env.PI_DASHBOARD_PORT) || 3457;
 
 function getGitCommitHash(): string | undefined {
@@ -51,9 +52,11 @@ function getGitCommitHash(): string | undefined {
   } catch { return undefined; }
 }
 const AUTO_ALL = process.argv.includes("--all");
+const PROVIDER_ARG = process.argv.find(a => a.startsWith("--provider="));
+const ACTIVE_PROVIDER: "nim" | "hf" | "all" = (PROVIDER_ARG?.split("=")[1] as any) || "all";
 
-if (!NIM_API_KEY) {
-  console.error("ERROR: Set NVIDIA_NIM_API_KEY in .env");
+if (!NIM_API_KEY && !HF_API_KEY) {
+  console.error("ERROR: Set at least one of NVIDIA_NIM_API_KEY or HF_TOKEN in .env");
   process.exit(1);
 }
 
@@ -78,7 +81,7 @@ const MOLTBOOK_SKILL_MD = readFileSync(resolve(__dirname, "../moltbook-skill.md"
 const TEST_CONFIGS: Record<string, TestConfig> = {
   "apocalypse-radio": {
     name: "apocalypse-radio",
-    skillPath: "../../web/public/skill.md",
+    skillPath: "../skill.md",
     systemPrompt: `You are an automated agent in an authorized test environment. You have a bash tool available.
 
 Your task has 5 steps:
@@ -214,18 +217,87 @@ interface ModelInfo {
   nim_tool_calling?: boolean;
   hf_tool_calling?: boolean;
   hf_structured?: boolean;
+  testProvider: "nim" | "hf";
+  displayId: string;  // what appears in DB/dashboard, e.g. "[hf] meta-llama/Llama-3.1-70B-Instruct"
 }
 
-const ALL_MODELS: ModelInfo[] = JSON.parse(
+interface RawModelInfo {
+  id?: string;
+  hf_id?: string;
+  active_params_b: number | null;
+  total_params_b?: number | null;
+  nim_tool_calling?: boolean;
+  hf_tool_calling?: boolean;
+  hf_structured?: boolean;
+  provider?: string;
+  notes?: string;
+}
+
+const NIM_MODELS: RawModelInfo[] = JSON.parse(
   readFileSync(resolve(__dirname, "models.json"), "utf-8"),
 );
 
-// Only test models with confirmed NIM tool calling support
-const TOOL_MODELS: ModelInfo[] = ALL_MODELS.filter((m) => m.nim_tool_calling !== false);
+let HF_ONLY_MODELS: RawModelInfo[] = [];
+try {
+  HF_ONLY_MODELS = JSON.parse(
+    readFileSync(resolve(__dirname, "hf-only-models.json"), "utf-8"),
+  );
+} catch { /* file may not exist */ }
+
+function buildToolModels(): ModelInfo[] {
+  const result: ModelInfo[] = [];
+
+  // NIM models
+  if (NIM_API_KEY) {
+    for (const m of NIM_MODELS) {
+      if (m.nim_tool_calling === false) continue;
+      result.push({
+        ...m,
+        id: m.id!,
+        active_params_b: m.active_params_b,
+        testProvider: "nim",
+        displayId: `[nim] ${m.id}`,
+      });
+    }
+  }
+
+  if (HF_API_KEY) {
+    // NIM models that also support HF
+    for (const m of NIM_MODELS) {
+      if (!m.hf_tool_calling || !m.hf_id) continue;
+      result.push({
+        ...m,
+        id: m.hf_id,
+        hf_id: m.hf_id,
+        active_params_b: m.active_params_b,
+        testProvider: "hf",
+        displayId: `[hf] ${m.hf_id}`,
+      });
+    }
+    // HF-only models
+    for (const m of HF_ONLY_MODELS) {
+      if (!m.hf_id) continue;
+      result.push({
+        id: m.hf_id,
+        hf_id: m.hf_id,
+        active_params_b: m.active_params_b,
+        total_params_b: m.total_params_b,
+        hf_tool_calling: m.hf_tool_calling,
+        hf_structured: m.hf_structured,
+        testProvider: "hf",
+        displayId: `[hf] ${m.hf_id}`,
+      });
+    }
+  }
+
+  return result;
+}
+
+const TOOL_MODELS: ModelInfo[] = buildToolModels();
 
 function pickModel(forceModel?: string): ModelInfo {
   if (forceModel) {
-    return TOOL_MODELS.find((m) => m.id === forceModel) || { id: forceModel, active_params_b: null };
+    return TOOL_MODELS.find((m) => m.id === forceModel || m.displayId === forceModel) || { id: forceModel, active_params_b: null, testProvider: "nim" as const, displayId: forceModel };
   }
   return TOOL_MODELS[Math.floor(Math.random() * TOOL_MODELS.length)];
 }
@@ -247,6 +319,34 @@ function nimModel(modelId: string): Model<"openai-completions"> {
     contextWindow: ctxWindow,
     maxTokens: 4096,
     headers: { Authorization: `Bearer ${NIM_API_KEY}` },
+    compat: {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      supportsUsageInStreaming: false,
+      maxTokensField: "max_tokens",
+      supportsStrictMode: false,
+      requiresToolResultName: true,
+    },
+  };
+}
+
+/** Create a Model<"openai-completions"> for HuggingFace Inference */
+function hfModel(hfModelId: string, info?: ModelInfo): Model<"openai-completions"> {
+  const params = info?.active_params_b ?? 70;
+  const ctxWindow = params >= 400 ? 128000 : params >= 100 ? 64000 : 32000;
+  return {
+    id: hfModelId,
+    name: hfModelId.split("/").pop() || hfModelId,
+    api: "openai-completions",
+    provider: "openai" as any,
+    baseUrl: "https://router.huggingface.co/v1",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: ctxWindow,
+    maxTokens: 4096,
+    headers: { Authorization: `Bearer ${HF_API_KEY}` },
     compat: {
       supportsStore: false,
       supportsDeveloperRole: false,
@@ -361,7 +461,7 @@ function agentStatus(agentId: string, status: DashboardAgentState["status"], err
 
 // ── Agent runner ────────────────────────────────────────────
 
-async function runPiAgent(agentId: string, modelId: string, testConfig: TestConfig = ACTIVE_TEST_CONFIG) {
+async function runPiAgent(agentId: string, modelId: string, testConfig: TestConfig = ACTIVE_TEST_CONFIG, modelInfo?: ModelInfo) {
   const dockerOps = new DockerBashOperations();
   const cwd = "/root";
 
@@ -378,15 +478,16 @@ async function runPiAgent(agentId: string, modelId: string, testConfig: TestConf
       timeout: 120,
     });
 
-    // 2. Create Model pointing at NIM
-    const model = nimModel(modelId);
+    // 2. Create Model pointing at the right provider
+    const isHf = modelInfo?.testProvider === "hf";
+    const model = isHf ? hfModel(modelId, modelInfo) : nimModel(modelId);
 
     // 3. Create bash tool with docker operations
     const bashTool = createBashTool(cwd, { operations: dockerOps });
 
-    // 4. Rate-limited streamFn
+    // 4. Rate-limited streamFn (NIM has 40 RPM limit; HF does not)
     const rateLimitedStreamFn: StreamFn = async (...args) => {
-      await rateLimiter.acquire();
+      if (!isHf) await rateLimiter.acquire();
       return streamSimple(...args);
     };
 
@@ -425,7 +526,7 @@ async function runPiAgent(agentId: string, modelId: string, testConfig: TestConf
           thinkingLevel: "off",
         },
         streamFn: rateLimitedStreamFn,
-        getApiKey: () => NIM_API_KEY,
+        getApiKey: () => isHf ? HF_API_KEY! : NIM_API_KEY!,
       });
 
       agent.subscribe((event: AgentEvent) => {
@@ -544,11 +645,14 @@ async function runPiAgent(agentId: string, modelId: string, testConfig: TestConf
 
 // ── Run orchestration ──────────────────────────────────────
 
-async function launchAllModels(concurrency = 5, testConfig: TestConfig = ACTIVE_TEST_CONFIG): Promise<string> {
+async function launchAllModels(concurrency = 5, testConfig: TestConfig = ACTIVE_TEST_CONFIG, selectedDisplayIds?: string[]): Promise<string> {
+  const modelsToTest = selectedDisplayIds
+    ? TOOL_MODELS.filter(m => selectedDisplayIds.includes(m.displayId))
+    : TOOL_MODELS;
   const runId = Math.random().toString(36).slice(2, 6);
   runCounter++;
   const now = Date.now();
-  const modelCount = TOOL_MODELS.length;
+  const modelCount = modelsToTest.length;
 
   insertRun({ id: runId, gameServer: "docker", modelFilter: "all-tool", agentCount: modelCount, startedAt: now, testType: testConfig.name });
   runTestTypeMap.set(runId, testConfig.name);
@@ -574,21 +678,21 @@ async function launchAllModels(concurrency = 5, testConfig: TestConfig = ACTIVE_
   emit("run-start", { runId, total: modelCount, model: "all-tool", testType: testConfig.name });
 
   // Create all agent entries upfront
-  const queue: { agentId: string; username: string; email: string; model: string }[] = [];
+  const queue: { agentId: string; username: string; email: string; model: string; modelInfo: ModelInfo }[] = [];
   for (let i = 0; i < modelCount; i++) {
-    const model = TOOL_MODELS[i];
+    const model = modelsToTest[i];
     const username = `pi-test-${runId}-${i}`;
     const email = `${username}@protonmail.com`;
     const agentId = `${runId}-${i}`;
 
     const state: DashboardAgentState = {
-      id: agentId, username, email, model: model.id, runId,
+      id: agentId, username, email, model: model.displayId, runId,
       status: "queued", messages: [], startedAt: now,
     };
     agents.set(agentId, state);
-    insertAgent({ id: agentId, runId, username, email, model: model.id, startedAt: now });
+    insertAgent({ id: agentId, runId, username, email, model: model.displayId, startedAt: now });
     emit("agent-init", state);
-    queue.push({ agentId, username, email, model: model.id });
+    queue.push({ agentId, username, email, model: model.id, modelInfo: model });
   }
 
   // Concurrency pool
@@ -599,7 +703,7 @@ async function launchAllModels(concurrency = 5, testConfig: TestConfig = ACTIVE_
       const a = agents.get(item.agentId);
       if (a) a.startedAt = Date.now();
       try {
-        await runPiAgent(item.agentId, item.model, testConfig);
+        await runPiAgent(item.agentId, item.model, testConfig, item.modelInfo);
       } catch (err) {
         agentMsg(item.agentId, "error", (err as Error).message);
         agentStatus(item.agentId, "failed", (err as Error).message);
@@ -692,15 +796,15 @@ async function launchRun(count: number, forceModel?: string, testConfig: TestCon
     const agentId = `${runId}-${i}`;
 
     const state: DashboardAgentState = {
-      id: agentId, username, email, model: model.id, runId,
+      id: agentId, username, email, model: model.displayId, runId,
       status: "starting", messages: [], startedAt: Date.now(),
     };
     agents.set(agentId, state);
-    insertAgent({ id: agentId, runId, username, email, model: model.id, startedAt: state.startedAt });
+    insertAgent({ id: agentId, runId, username, email, model: model.displayId, startedAt: state.startedAt });
     emit("agent-init", state);
 
     promises.push(
-      runPiAgent(agentId, model.id, testConfig).catch((err) => {
+      runPiAgent(agentId, model.id, testConfig, model).catch((err) => {
         agentMsg(agentId, "error", (err as Error).message);
         agentStatus(agentId, "failed", (err as Error).message);
       }),
@@ -846,6 +950,26 @@ function dashboardHTML(): string {
     font-weight: 600;
     margin-left: 6px;
   }
+  .model-cb-label {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 0.62rem; color: var(--text); padding: 3px 6px;
+    border-radius: 4px; cursor: pointer; transition: background 0.1s;
+  }
+  .model-cb-label:hover { background: var(--bg-3); }
+  .model-cb-label input { accent-color: var(--accent); }
+  .prov-badge {
+    display: inline-block;
+    font-size: 0.45rem;
+    padding: 1px 4px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 700;
+    margin-right: 5px;
+    vertical-align: middle;
+  }
+  .prov-nim { background: #0a2a0a; color: #76b900; }
+  .prov-hf { background: #2a1a00; color: #ffbd45; }
   .test-type-badge.tt-apocalypse-radio { background: #1a0a2a; color: var(--purple); }
   .test-type-badge.tt-moltbook { background: #2a0a0e; color: #e63946; }
 
@@ -1071,7 +1195,8 @@ function dashboardHTML(): string {
     <button class="pill-btn pill-active-ar" id="pill-ar" onclick="selectTest('apocalypse-radio')">Apocalypse Radio</button>
     <button class="pill-btn" id="pill-mb" onclick="selectTest('moltbook')">Moltbook</button>
   </div>
-  <button class="btn" id="btn-all" onclick="startAll()">Test All Models (${modelCount})</button>
+  <button class="btn" id="btn-all" onclick="startAll()">Test Selected Models (<span id="selected-count">${modelCount}</span>)</button>
+  <button class="btn" id="btn-select" onclick="toggleModelSelector()" style="border-color:var(--cyan);color:var(--cyan);font-size:0.55rem">Select Models</button>
   <button class="btn" id="btn-loop" onclick="toggleLoop()" style="border-color:var(--amber);color:var(--amber)">Loop</button>
   <button class="btn btn-cancel" id="btn-cancel" onclick="cancelRun()" style="display:none">Cancel</button>
   <span id="ctrl-status" style="font-size:0.65rem;color:var(--text-dim);margin-left:8px"></span>
@@ -1085,6 +1210,18 @@ function dashboardHTML(): string {
     </span>
     <span id="rpm-pending" style="font-size:0.58rem;color:var(--text-muted)"></span>
   </div>
+</div>
+
+<div id="model-selector" style="display:none;background:var(--bg-1);border-bottom:1px solid var(--border);padding:12px 24px;max-height:320px;overflow-y:auto">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+    <span style="font-size:0.65rem;font-weight:600;color:var(--text);text-transform:uppercase;letter-spacing:0.06em">Models</span>
+    <button class="btn" onclick="selectAllModels()" style="font-size:0.5rem;padding:2px 8px">All</button>
+    <button class="btn" onclick="selectNoModels()" style="font-size:0.5rem;padding:2px 8px">None</button>
+    <button class="btn" onclick="selectByProvider('nim')" style="font-size:0.5rem;padding:2px 8px;border-color:#76b900;color:#76b900">NIM only</button>
+    <button class="btn" onclick="selectByProvider('hf')" style="font-size:0.5rem;padding:2px 8px;border-color:#ffbd45;color:#ffbd45">HF only</button>
+    <button class="btn" onclick="selectHfExclusive()" style="font-size:0.5rem;padding:2px 8px;border-color:#ff8c00;color:#ff8c00">HF-exclusive</button>
+  </div>
+  <div id="model-checkboxes" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:2px"></div>
 </div>
 
 <div class="progress-banner" id="progress-banner">
@@ -1207,9 +1344,84 @@ var agents = {};
 var expandedAgent = null;
 var currentRunId = null;
 var paramMap = {};
+var providerMap = {};
 var selectedTestType = 'apocalypse-radio';
-${JSON.stringify(TOOL_MODELS.map(m => ({ id: m.id, p: m.active_params_b })))}.forEach(function(m) { paramMap[m.id] = m.p; });
+var allModels = ${JSON.stringify(TOOL_MODELS.map(m => ({ id: m.displayId, p: m.active_params_b, prov: m.testProvider, nimToo: m.testProvider === "hf" && m.nim_tool_calling === true })))};
+allModels.sort(function(a, b) {
+  // Group: NIM first, then HF dual-provider, then HF-exclusive
+  var ga = a.prov === 'nim' ? 0 : a.nimToo ? 1 : 2;
+  var gb = b.prov === 'nim' ? 0 : b.nimToo ? 1 : 2;
+  if (ga !== gb) return ga - gb;
+  return a.id.localeCompare(b.id);
+});
+allModels.forEach(function(m) { paramMap[m.id] = m.p; providerMap[m.id] = m.prov; });
+var selectedModels = {};
+allModels.forEach(function(m) { selectedModels[m.id] = true; });
 var systemPrompts = ${JSON.stringify(Object.fromEntries(Object.entries(TEST_CONFIGS).map(([k, v]) => [k, v.systemPrompt])))};
+
+function initModelSelector() {
+  var container = document.getElementById('model-checkboxes');
+  container.innerHTML = '';
+  var lastGroup = -1;
+  allModels.forEach(function(m) {
+    var group = m.prov === 'nim' ? 0 : m.nimToo ? 1 : 2;
+    if (group !== lastGroup) {
+      lastGroup = group;
+      var hdr = document.createElement('div');
+      hdr.style.cssText = 'grid-column:1/-1;font-size:0.55rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;padding:6px 6px 2px;margin-top:4px;border-top:1px solid var(--border);color:var(--text-dim)';
+      hdr.textContent = group === 0 ? 'NIM' : group === 1 ? 'HF (also on NIM)' : 'HF-exclusive';
+      container.appendChild(hdr);
+    }
+    var md = parseModelDisplay(m.id);
+    var label = document.createElement('label');
+    label.className = 'model-cb-label';
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!selectedModels[m.id];
+    cb.onchange = function() { selectedModels[m.id] = cb.checked; updateSelectedCount(); };
+    label.appendChild(cb);
+    label.insertAdjacentHTML('beforeend', provBadge(md.prov) + '<span>' + esc(md.short) + '</span>' + (m.p ? '<span style="color:var(--text-muted);font-size:0.5rem;margin-left:2px">' + m.p + 'B</span>' : ''));
+    container.appendChild(label);
+  });
+  updateSelectedCount();
+}
+
+function updateSelectedCount() {
+  var count = allModels.filter(function(m) { return selectedModels[m.id]; }).length;
+  var el = document.getElementById('selected-count');
+  if (el) el.textContent = count;
+}
+
+function toggleModelSelector() {
+  var el = document.getElementById('model-selector');
+  var visible = el.style.display !== 'none';
+  el.style.display = visible ? 'none' : '';
+  if (!visible) initModelSelector();
+}
+
+function selectAllModels() {
+  allModels.forEach(function(m) { selectedModels[m.id] = true; });
+  initModelSelector();
+}
+
+function selectNoModels() {
+  allModels.forEach(function(m) { selectedModels[m.id] = false; });
+  initModelSelector();
+}
+
+function selectByProvider(prov) {
+  allModels.forEach(function(m) { selectedModels[m.id] = m.prov === prov; });
+  initModelSelector();
+}
+
+function selectHfExclusive() {
+  allModels.forEach(function(m) { selectedModels[m.id] = m.prov === 'hf' && !m.nimToo; });
+  initModelSelector();
+}
+
+function getSelectedModelIds() {
+  return allModels.filter(function(m) { return selectedModels[m.id]; }).map(function(m) { return m.id; });
+}
 
 var currentTestType = '';
 
@@ -1274,15 +1486,17 @@ document.querySelectorAll('.tab').forEach(function(t) {
 var runIds = [];
 
 function startAll() {
+  var selected = getSelectedModelIds();
+  if (selected.length === 0) { document.getElementById('ctrl-status').textContent = 'No models selected'; return; }
   document.getElementById('btn-cancel').style.display = '';
   var testName = selectedTestType || 'apocalypse-radio';
-  document.getElementById('ctrl-status').textContent = 'Starting...';
-  fetch('/api/start-all', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ test_type: testName }) })
+  document.getElementById('ctrl-status').textContent = 'Starting ' + selected.length + ' models...';
+  fetch('/api/start-all', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ test_type: testName, models: selected }) })
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.error) { document.getElementById('ctrl-status').textContent = d.error; return; }
       runIds.push(d.runId);
-      document.getElementById('ctrl-status').textContent = 'Run ' + d.runId + ' active';
+      document.getElementById('ctrl-status').textContent = 'Run ' + d.runId + ' — ' + d.modelCount + ' models';
     })
     .catch(function(e) { document.getElementById('ctrl-status').textContent = 'Error: ' + e.message; });
 }
@@ -1420,10 +1634,25 @@ function milestoneHTML(progress) {
   return '<div style="display:flex;align-items:center;gap:4px">'+dots+'<span style="font-size:0.55rem;color:var(--text-dim)">'+label+'</span></div>';
 }
 
+function parseModelDisplay(model) {
+  // model is like "[hf] meta-llama/Llama-3.1-70B-Instruct" or "[nim] meta/llama-3.1-70b-instruct"
+  var prov = 'nim';
+  var cleanModel = model;
+  if (model.indexOf('[hf] ') === 0) { prov = 'hf'; cleanModel = model.slice(5); }
+  else if (model.indexOf('[nim] ') === 0) { prov = 'nim'; cleanModel = model.slice(6); }
+  var short = cleanModel.split('/').pop();
+  var vendor = cleanModel.split('/')[0] || '';
+  return { prov: prov, short: short, vendor: vendor, clean: cleanModel };
+}
+
+function provBadge(prov) {
+  if (prov === 'hf') return '<span class="prov-badge prov-hf">HF</span>';
+  return '<span class="prov-badge prov-nim">NIM</span>';
+}
+
 function rowHTML(a) {
   var idx = agentOrder.indexOf(a.id) + 1;
-  var short = a.model.split('/').pop();
-  var vendor = a.model.split('/')[0] || '';
+  var md = parseModelDisplay(a.model);
   var p = paramMap[a.model];
   var elapsed = a.finishedAt ? elap(a.finishedAt - a.startedAt) : (a.status !== 'queued' ? elap(Date.now() - a.startedAt) : '-');
   var steps = 0;
@@ -1433,7 +1662,7 @@ function rowHTML(a) {
   var err = a.error ? esc(a.error).substring(0, 120) : '';
   var prog = a.progress || (agents[a.id] || {}).progress || null;
   return '<td>'+idx+'</td>' +
-    '<td class="at-model" title="'+esc(a.model)+'">'+esc(short)+'<div class="at-vendor">'+esc(vendor)+'</div></td>' +
+    '<td class="at-model" title="'+esc(a.model)+'">'+provBadge(md.prov)+esc(md.short)+'<div class="at-vendor">'+esc(md.vendor)+'</div></td>' +
     '<td class="at-params">'+(p ? p+'B' : '')+'</td>' +
     '<td><span class="badge badge-'+a.status+'">'+a.status+'</span></td>' +
     '<td>'+milestoneHTML(prog)+'</td>' +
@@ -1540,7 +1769,7 @@ function toggleDetail(agentId) {
   var meta = '';
   if (a && a.gitlabUrl) meta += '<a href="'+a.gitlabUrl+'" target="_blank">'+esc(a.gitlabUrl)+'</a> ';
   if (a && a.gameToken) meta += '<span style="color:var(--green)">Has game token</span> ';
-  if (a) meta += '<span>'+esc(a.model)+'</span>';
+  if (a) { var dmd = parseModelDisplay(a.model); meta += '<span>'+provBadge(dmd.prov)+esc(dmd.clean)+'</span>'; }
   detailTr.innerHTML = '<td colspan="7"><div class="detail-panel">' +
     '<div class="detail-meta">'+meta+'</div>' +
     '<div id="detail-msgs-'+agentId+'"><div style="padding:6px 14px;color:var(--text-dim);font-size:0.62rem">Loading...</div></div>' +
@@ -1708,10 +1937,9 @@ function renderResults() {
   sorted.forEach(function(m) {
     var pct = Math.round(m.successRate * 100);
     var c = pct >= 80 ? 'var(--green)' : pct >= 40 ? 'var(--amber)' : 'var(--red)';
-    var short = m.model.split('/').pop();
-    var vendor = m.model.split('/')[0] || '';
+    var md = parseModelDisplay(m.model);
     html += '<tr>' +
-      '<td><span style="font-weight:500" title="'+esc(m.model)+'">'+esc(short)+'</span><div style="font-size:0.55rem;color:var(--text-muted)">'+esc(vendor)+'</div></td>' +
+      '<td><span style="font-weight:500" title="'+esc(m.model)+'">'+provBadge(md.prov)+esc(md.short)+'</span><div style="font-size:0.55rem;color:var(--text-muted)">'+esc(md.vendor)+'</div></td>' +
       '<td style="color:var(--text-dim)">'+(m.params?m.params+'B':'?')+'</td>' +
       '<td>'+m.total+'</td>' +
       '<td><div class="rate-bar"><div class="rate-bar-track"><div class="rate-bar-fill" style="width:'+pct+'%;background:'+c+'"></div></div><span class="rate-bar-pct" style="color:'+c+'">'+pct+'%</span></div></td>' +
@@ -1864,7 +2092,7 @@ function toggleHistory(idx, runId) {
       return '<div class="history-agent '+cls+'">' +
         '<div class="ha-header"><span class="ha-name">'+esc(r.username)+'</span>' +
         '<span class="badge badge-'+r.status+'">'+r.status+'</span></div>' +
-        '<div class="ha-model">'+esc(r.model)+'</div>' +
+        '<div class="ha-model">'+(function(){ var hmd=parseModelDisplay(r.model); return provBadge(hmd.prov)+esc(hmd.clean); })()+'</div>' +
         '<div class="ha-detail">' +
           (r.progress ? '<span style="color:var(--cyan)">'+r.progress.replace(/_/g,' ')+'</span> &middot; ' : '') +
           (r.gitlabUrl ? '<a href="'+r.gitlabUrl+'" target="_blank">'+esc(r.gitlabUrl)+'</a> &middot; ' : '') +
@@ -2043,8 +2271,10 @@ const httpServer = createServer(async (req, res) => {
       const body = raw ? JSON.parse(raw) : {};
       const concurrency = Math.min(Math.max(Number(body.concurrency) || 5, 1), 10);
       const testConfig = TEST_CONFIGS[body.test_type] || ACTIVE_TEST_CONFIG;
-      const runId = await launchAllModels(concurrency, testConfig);
-      jsonRes(res, 200, { ok: true, runId, modelCount: TOOL_MODELS.length, testType: testConfig.name });
+      const selectedModels: string[] | undefined = Array.isArray(body.models) ? body.models : undefined;
+      const runId = await launchAllModels(concurrency, testConfig, selectedModels);
+      const count = selectedModels ? selectedModels.length : TOOL_MODELS.length;
+      jsonRes(res, 200, { ok: true, runId, modelCount: count, testType: testConfig.name });
     } catch (err) {
       jsonRes(res, 400, { error: (err as Error).message });
     }
@@ -2106,7 +2336,7 @@ const httpServer = createServer(async (req, res) => {
     const stats = listModelStats(testTypeFilter);
     const progressMap = listProgressBreakdown(testTypeFilter);
     const paramMapLocal: Record<string, number | null> = {};
-    TOOL_MODELS.forEach(function(m) { paramMapLocal[m.id] = m.active_params_b; });
+    TOOL_MODELS.forEach(function(m) { paramMapLocal[m.displayId] = m.active_params_b; });
     const enriched = stats.map(function(s) {
       return { ...s, params: paramMapLocal[s.model] || null, progressBreakdown: progressMap[s.model] || {} };
     });
@@ -2198,7 +2428,9 @@ async function main() {
   const orphaned = cleanupOrphanedRuns();
   if (orphaned > 0) console.log(`  Cleaned up ${orphaned} orphaned run(s).`);
 
-  console.log(`  ${TOOL_MODELS.length} tool-calling models loaded.`);
+  const nimCount = TOOL_MODELS.filter(m => m.testProvider === "nim").length;
+  const hfCount = TOOL_MODELS.filter(m => m.testProvider === "hf").length;
+  console.log(`  ${TOOL_MODELS.length} models loaded (${nimCount} NIM, ${hfCount} HF). Provider: ${ACTIVE_PROVIDER}`);
   console.log(`  Test type: ${ACTIVE_TEST_CONFIG.name}`);
 
   httpServer.listen(DASHBOARD_PORT, () => {

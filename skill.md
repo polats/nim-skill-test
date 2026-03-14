@@ -15,12 +15,17 @@ echo "gitlab.crux.casa" > /tmp/gl_host.txt
 echo "MY_UNIQUE_USERNAME" > /tmp/gl_user.txt
 curl -s -c /tmp/gl_cookies.txt "https://gitlab.crux.casa/users/sign_up" -o /tmp/signup.html
 python3 -c '
-import re
-h = open("/tmp/signup.html").read()
-m = re.search(r"authenticity_token[^>]*value=\"([^\"]+)\"", h)
-t = m.group(1) if m else "NOTFOUND"
-open("/tmp/gl_csrf.txt", "w").write(t)
-print(t[:20] + "...")
+from html.parser import HTMLParser
+class F(HTMLParser):
+    t = "NOTFOUND"
+    def handle_starttag(self, tag, attrs):
+        d = dict(attrs)
+        if d.get("name") == "authenticity_token" and "value" in d:
+            self.t = d["value"]
+f = F()
+f.feed(open("/tmp/signup.html").read())
+open("/tmp/gl_csrf.txt", "w").write(f.t)
+print(f.t[:20] + "...")
 '
 ```
 
@@ -52,12 +57,17 @@ curl -s -b /tmp/gl_cookies.txt -c /tmp/gl_cookies.txt -X POST "https://${GITLAB}
 GITLAB=$(cat /tmp/gl_host.txt)
 curl -s -b /tmp/gl_cookies.txt -c /tmp/gl_cookies.txt "https://${GITLAB}/-/user_settings/personal_access_tokens" -o /tmp/pat_page.html
 python3 -c '
-import re
-h = open("/tmp/pat_page.html").read()
-m = re.search(r"csrf-token[^>]*content=\"([^\"]+)\"", h)
-t = m.group(1) if m else "NOTFOUND"
-open("/tmp/pat_csrf.txt", "w").write(t)
-print("CSRF: " + t[:20] + "...")
+from html.parser import HTMLParser
+class F(HTMLParser):
+    t = "NOTFOUND"
+    def handle_starttag(self, tag, attrs):
+        d = dict(attrs)
+        if d.get("name") == "csrf-token" and "content" in d:
+            self.t = d["content"]
+f = F()
+f.feed(open("/tmp/pat_page.html").read())
+open("/tmp/pat_csrf.txt", "w").write(f.t)
+print("CSRF: " + f.t[:20] + "...")
 '
 PAT_CSRF=$(cat /tmp/pat_csrf.txt)
 curl -s -b /tmp/gl_cookies.txt -c /tmp/gl_cookies.txt -X POST "https://${GITLAB}/-/user_settings/personal_access_tokens" \
@@ -69,13 +79,9 @@ curl -s -b /tmp/gl_cookies.txt -c /tmp/gl_cookies.txt -X POST "https://${GITLAB}
 python3 -c '
 import json
 d = json.load(open("/tmp/pat_resp.json"))
-t = d.get("new_token", "")
-if t:
-    open("/tmp/gl_pat.txt", "w").write(t)
-    print("PAT: " + t)
-else:
-    print("ERROR: PAT creation failed. Response: " + json.dumps(d))
-    print("Re-run Steps 1-2 with a new username, then retry Step 3.")
+t = d.get("new_token") or d.get("token", "")
+open("/tmp/gl_pat.txt", "w").write(t)
+print("PAT: " + t if t else "ERROR: " + json.dumps(d))
 '
 ```
 

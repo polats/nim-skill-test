@@ -1,0 +1,92 @@
+[
+  {
+    "hf_id": "CohereLabs/c4ai-command-a-03-2025",
+    "provider": "cohere",
+    "total_params_b": 111.0,
+    "active_params_b": 111.0,
+    "architecture": "Dense",
+    "hf_tool_calling": true,
+    "hf_structured": true,
+    "notes": "Cohere Command A, strong tool use, CC-BY-NC license, multi-language"
+  },
+  {
+    "hf_id": "CohereLabs/c4ai-command-r7b-12-2024",
+    "provider": "cohere",
+    "total_params_b": 7.0,
+    "active_params_b": 7.0,
+    "architecture": "Dense",
+    "hf_tool_calling": true,
+    "hf_structured": false,
+    "notes": "Small Cohere model, 7B"
+  },
+  {
+    "hf_id": "inclusionAI/Ling-1T",
+    "provider": "inclusionai",
+    "total_params_b": 1000.0,
+    "active_params_b": null,
+    "architecture": "MoE",
+    "hf_tool_calling": true,
+    "hf_structured": false,
+    "notes": "1T param MoE, MIT license, Bailing architecture"
+  },
+  {
+    "hf_id": "Nanbeige/Nanbeige4.1-3B",
+    "provider": "nanbeige",
+    "total_params_b": 3.0,
+    "active_params_b": 3.0,
+    "architecture": "Dense",
+    "hf_tool_calling": true,
+    "hf_structured": false,
+    "notes": "Tiny 3B model with tool calling, interesting data point"
+  },
+  {
+    "hf_id": "XiaomiMiMo/MiMo-V2-Flash",
+    "provider": "xiaomi",
+    "total_params_b": null,
+    "active_params_b": null,
+    "architecture": "Dense",
+    "hf_tool_calling": true,
+    "hf_structured": false,
+    "notes": "Xiaomi reasoning model, tool calling support"
+  },
+  {
+    "hf_id": "OpenHands/openhands-lm-32b-v0.1",
+    "provider": "openhands",
+    "total_params_b": 32.0,
+    "active_params_b": 32.0,
+    "architecture": "Dense",
+    "hf_tool_calling": true,
+    "hf_structured": false,
+    "notes": "Built for coding agents, Qwen2-based fine-tune"
+  },
+  {
+    "hf_id": "Menlo/Jan-nano",
+    "provider": "menlo",
+    "total_params_b": null,
+    "active_params_b": null,
+    "architecture": "Dense",
+    "hf_tool_calling": true,
+    "hf_structured": false,
+    "notes": "Small model with tool calling"
+  },
+  {
+    "hf_id": "moonshotai/Kimi-Dev-72B",
+    "provider": "moonshotai",
+    "total_params_b": 72.0,
+    "active_params_b": 72.0,
+    "architecture": "Dense",
+    "hf_tool_calling": true,
+    "hf_structured": false,
+    "notes": "Dev-focused Kimi, 72B — different from K2 series already on NIM"
+  },
+  {
+    "hf_id": "agentica-org/DeepCoder-14B-Preview",
+    "provider": "agentica",
+    "total_params_b": 14.0,
+    "active_params_b": 14.0,
+    "architecture": "Dense",
+    "hf_tool_calling": true,
+    "hf_structured": false,
+    "notes": "Coding-focused agent model"
+  }
+]
