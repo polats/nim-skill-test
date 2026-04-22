@@ -1,0 +1,8 @@
+model	result	progress	duration_s	total_s	bridge_calls	timestamp
+gemma-4-E2B-it-Q4_K_M	pass	all_three	12s	19	3	2026-04-21T22:54:28-04:00
+gemma-4-E4B-it-Q4_K_M	pass	all_three	13s	21	3	2026-04-21T22:54:49-04:00
+qwen3.5-9b-Q4_K_M	pass	all_three	15s	77	3	2026-04-21T22:56:06-04:00
+hermes-3-llama-3.1-8b-Q4_K_M	fail	none	29s	82	0	2026-04-21T22:57:28-04:00
+gemma-4-26B-A4B-it-Q4_K_M	pass	all_three	21s	244	3	2026-04-21T23:01:32-04:00
+gemma-4-31B-it-Q4_K_M	pass	all_three	26s	270	3	2026-04-21T23:06:02-04:00
+qwen3.6-35B-A3B-Q4_K_M	pass	all_three	13s	305	3	2026-04-21T23:21:38-04:00

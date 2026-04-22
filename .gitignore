@@ -4,6 +4,8 @@ dist/
 *.db-shm
 *.db-wal
 .env
+.env.llama-cpp
 *.log
+logs/
 results.tsv
 .agent-homes/

@@ -1,0 +1,41 @@
+name: nim-skill-test-llama-cpp
+
+# Standalone llama.cpp server for local model testing.
+#
+# Usage:
+#   ./scripts/swap-local-model.sh <catalog-id>   # downloads the GGUF + restarts
+#   docker compose -f compose.llama-cpp.yml up -d
+#   LOCAL_LLM_BASE_URL=http://localhost:18080/v1 LOCAL_LLM_MODEL=<id> npx tsx src/run.ts --provider=local --all
+#
+# Switch to :server-cuda if you have CUDA + nvidia-container-toolkit installed.
+# --jinja enables OpenAI-style function calling via Jinja chat templates.
+
+services:
+  llama-cpp:
+    image: ${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    # Comment out the deploy block + switch image back to :server for CPU-only.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    environment:
+      HF_TOKEN: "${HF_TOKEN:-}"
+    command: >
+      --host 0.0.0.0
+      --port 8080
+      --jinja
+      --parallel ${LLAMA_CPP_PARALLEL:-1}
+      -ngl ${LLAMA_CPP_NGL:-99}
+      -hf ${LLAMA_CPP_HF_REPO}:${LLAMA_CPP_QUANT}
+      ${LLAMA_CPP_EXTRA_ARGS:---ctx-size 32768}
+    restart: unless-stopped
+
+volumes:
+  hf-cache:

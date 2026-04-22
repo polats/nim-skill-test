@@ -23,7 +23,7 @@ import { Agent } from "@mariozechner/pi-agent-core";
 import type { AgentEvent, StreamFn } from "@mariozechner/pi-agent-core";
 import type { Model } from "@mariozechner/pi-ai";
 import { streamSimple } from "@mariozechner/pi-ai";
-import { createBashTool } from "@mariozechner/pi-coding-agent";
+import { createDockerBashTool } from "./docker-bash-tool.js";
 
 import {
   initDb, insertRun, finishRun, insertAgent, cleanupOrphanedRuns,
@@ -36,6 +36,7 @@ import {
 } from "./db.js";
 
 import { DockerBashOperations } from "./docker-bash-ops.js";
+import { startWoidBridge, type WoidBridge } from "./woid-bridge.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 config({ path: resolve(__dirname, "../.env") });
@@ -44,6 +45,8 @@ config({ path: resolve(__dirname, "../.env") });
 
 const NIM_API_KEY = process.env.NVIDIA_NIM_API_KEY;
 const HF_API_KEY = process.env.HF_TOKEN || process.env.HUGGINGFACE_TOKEN || process.env.HUGGING_FACE_POLATS;
+const LOCAL_LLM_BASE_URL = process.env.LOCAL_LLM_BASE_URL || "";
+const LOCAL_LLM_MODEL = process.env.LOCAL_LLM_MODEL || ""; // restrict local runs to this one id (matches catalog id or gguf)
 const DASHBOARD_PORT = Number(process.env.PI_DASHBOARD_PORT) || 3457;
 
 function getGitCommitHash(): string | undefined {
@@ -53,10 +56,10 @@ function getGitCommitHash(): string | undefined {
 }
 const AUTO_ALL = process.argv.includes("--all");
 const PROVIDER_ARG = process.argv.find(a => a.startsWith("--provider="));
-const ACTIVE_PROVIDER: "nim" | "hf" | "all" = (PROVIDER_ARG?.split("=")[1] as any) || "all";
+const ACTIVE_PROVIDER: "nim" | "hf" | "local" | "all" = (PROVIDER_ARG?.split("=")[1] as any) || "all";
 
-if (!NIM_API_KEY && !HF_API_KEY) {
-  console.error("ERROR: Set at least one of NVIDIA_NIM_API_KEY or HF_TOKEN in .env");
+if (!NIM_API_KEY && !HF_API_KEY && !LOCAL_LLM_BASE_URL) {
+  console.error("ERROR: Set at least one of NVIDIA_NIM_API_KEY, HF_TOKEN, or LOCAL_LLM_BASE_URL in .env");
   process.exit(1);
 }
 
@@ -77,6 +80,7 @@ interface TestConfig {
 
 const APOCALYPSE_SKILL_MD = readFileSync(resolve(__dirname, "../skill.md"), "utf-8");
 const MOLTBOOK_SKILL_MD = readFileSync(resolve(__dirname, "../moltbook-skill.md"), "utf-8");
+const WOID_SKILL_MD = readFileSync(resolve(__dirname, "../woid-skill.md"), "utf-8");
 
 const TEST_CONFIGS: Record<string, TestConfig> = {
   "apocalypse-radio": {
@@ -151,6 +155,37 @@ ${APOCALYPSE_SKILL_MD}
       return null;
     },
   },
+  "woid-skills": {
+    name: "woid-skills",
+    skillPath: "woid-skill.md",
+    // Stripped-down, single-turn prompt: 3 POSTs, in order, stop when done.
+    // The bridge (see woid-bridge.ts) answers each with a JSON payload the
+    // progress/success detectors key on via `"kind":"<x>"` markers.
+    systemPrompt: `You are an automated agent in an authorized test environment. You have a bash tool available.
+
+Complete the three steps in the tutorial below in order, using the bash tool for each curl call. Do not repeat calls. Stop after the third call returns a response containing "kind":"state".
+
+${WOID_SKILL_MD}
+`,
+    containerSetup: "apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1",
+    milestones: ["tool_use", "used_post", "used_move", "used_state", "all_three"],
+    progressDetector: (text: string, current: string | null) => {
+      // Skip documentation echoes.
+      if (text.includes("```") || text.includes("## Tool")) return current;
+      // The bridge responds with `"kind":"<x>"` — unambiguous.
+      if (text.includes('"kind":"post"')) return "used_post";
+      if (text.includes('"kind":"move"')) return "used_move";
+      if (text.includes('"kind":"state"')) return "used_state";
+      return current;
+    },
+    successDetector: (text: string) => {
+      // Marked as pass once the third endpoint replies. The runner's
+      // milestone-ordering logic still requires all three responses to
+      // be seen across the run; successDetector just flips the final bit.
+      if (text.includes('"kind":"state"') && text.includes('"ok":true')) return "all_three";
+      return null;
+    },
+  },
 };
 
 const TEST_TYPE_ARG = process.argv.find((a) => a.startsWith("--test="));
@@ -217,8 +252,10 @@ interface ModelInfo {
   nim_tool_calling?: boolean;
   hf_tool_calling?: boolean;
   hf_structured?: boolean;
-  testProvider: "nim" | "hf";
+  testProvider: "nim" | "hf" | "local";
   displayId: string;  // what appears in DB/dashboard, e.g. "[hf] meta-llama/Llama-3.1-70B-Instruct"
+  context_window?: number;
+  max_tokens?: number;
 }
 
 interface RawModelInfo {
@@ -233,6 +270,22 @@ interface RawModelInfo {
   notes?: string;
 }
 
+interface LocalModelInfo {
+  id: string;
+  hf_repo: string;
+  quant: string;
+  family: string;
+  provider: string;
+  total_params_b: number | null;
+  active_params_b: number | null;
+  context_window: number;
+  max_tokens: number;
+  tool_calling: "native" | "prompted" | "none";
+  llama_cpp_args?: string[];
+  tier: string;
+  notes?: string;
+}
+
 const NIM_MODELS: RawModelInfo[] = JSON.parse(
   readFileSync(resolve(__dirname, "models.json"), "utf-8"),
 );
@@ -241,6 +294,13 @@ let HF_ONLY_MODELS: RawModelInfo[] = [];
 try {
   HF_ONLY_MODELS = JSON.parse(
     readFileSync(resolve(__dirname, "hf-only-models.json"), "utf-8"),
+  );
+} catch { /* file may not exist */ }
+
+let LOCAL_MODELS: LocalModelInfo[] = [];
+try {
+  LOCAL_MODELS = JSON.parse(
+    readFileSync(resolve(__dirname, "local-models.json"), "utf-8"),
   );
 } catch { /* file may not exist */ }
 
@@ -290,6 +350,26 @@ function buildToolModels(): ModelInfo[] {
     }
   }
 
+  // Local (llama.cpp) models. Only loaded when LOCAL_LLM_BASE_URL is set.
+  // LOCAL_LLM_MODEL, if set, pins the catalog to the single model the
+  // running llama-server is actually serving — avoids queuing runs
+  // against an id the server won't answer to.
+  if (LOCAL_LLM_BASE_URL) {
+    for (const m of LOCAL_MODELS) {
+      if (m.tool_calling === "none") continue;
+      if (LOCAL_LLM_MODEL && m.id !== LOCAL_LLM_MODEL) continue;
+      result.push({
+        id: m.id,
+        active_params_b: m.active_params_b,
+        total_params_b: m.total_params_b,
+        testProvider: "local",
+        displayId: `[local] ${m.id}`,
+        context_window: m.context_window,
+        max_tokens: m.max_tokens,
+      });
+    }
+  }
+
   return result;
 }
 
@@ -330,6 +410,54 @@ function nimModel(modelId: string): Model<"openai-completions"> {
     },
   };
 }
+
+/** Create a Model<"openai-completions"> for a local llama.cpp server */
+function localModel(modelId: string, info?: ModelInfo): Model<"openai-completions"> {
+  const ctxWindow = info?.context_window ?? 32768;
+  const maxTokens = info?.max_tokens ?? 4096;
+  return {
+    id: modelId,
+    name: modelId,
+    api: "openai-completions",
+    provider: "openai" as any,
+    baseUrl: LOCAL_LLM_BASE_URL,
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: ctxWindow,
+    maxTokens,
+    // llama.cpp's /v1/chat/completions ignores the Authorization header when
+    // --api-key isn't set, but OpenAI SDKs still require *some* value.
+    headers: { Authorization: "Bearer no-key" },
+    compat: {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      supportsUsageInStreaming: false,
+      maxTokensField: "max_tokens",
+      supportsStrictMode: false,
+      requiresToolResultName: true,
+    },
+  };
+}
+
+// Single-flight lock for local runs. llama-server holds the model in VRAM
+// and serializes requests anyway — running 10 agents in parallel against it
+// just thrashes the queue. NIM/HF agents keep running in parallel.
+class Mutex {
+  private locked = false;
+  private queue: (() => void)[] = [];
+  async acquire(): Promise<() => void> {
+    if (this.locked) await new Promise<void>((resolve) => this.queue.push(resolve));
+    this.locked = true;
+    return () => {
+      this.locked = false;
+      const next = this.queue.shift();
+      if (next) next();
+    };
+  }
+}
+const localMutex = new Mutex();
 
 /** Create a Model<"openai-completions"> for HuggingFace Inference */
 function hfModel(hfModelId: string, info?: ModelInfo): Model<"openai-completions"> {
@@ -480,13 +608,27 @@ async function runPiAgent(agentId: string, modelId: string, testConfig: TestConf
 
     // 2. Create Model pointing at the right provider
     const isHf = modelInfo?.testProvider === "hf";
-    const model = isHf ? hfModel(modelId, modelInfo) : nimModel(modelId);
+    const isLocal = modelInfo?.testProvider === "local";
+    const model = isLocal
+      ? localModel(modelId, modelInfo)
+      : isHf
+      ? hfModel(modelId, modelInfo)
+      : nimModel(modelId);
 
-    // 3. Create bash tool with docker operations
-    const bashTool = createBashTool(cwd, { operations: dockerOps });
+    // 3. Create bash tool backed by DockerBashOperations — runs inside the
+    // per-agent container, not on the host. (pi-coding-agent's createBashTool
+    // dropped the `{operations}` parameter in v0.30.2.)
+    const bashTool = createDockerBashTool(dockerOps, cwd);
 
-    // 4. Rate-limited streamFn (NIM has 40 RPM limit; HF does not)
+    // 4. Rate-limited streamFn. NIM has 40 RPM global. HF is unlimited.
+    // Local runs serialize through a mutex (one model in VRAM, one call at a
+    // time) — we grab the lock inside streamFn and release in the finally so
+    // it rides across pi-agent-core's multi-turn loop naturally.
     const rateLimitedStreamFn: StreamFn = async (...args) => {
+      if (isLocal) {
+        const release = await localMutex.acquire();
+        try { return await streamSimple(...args); } finally { release(); }
+      }
       if (!isHf) await rateLimiter.acquire();
       return streamSimple(...args);
     };
@@ -526,7 +668,7 @@ async function runPiAgent(agentId: string, modelId: string, testConfig: TestConf
           thinkingLevel: "off",
         },
         streamFn: rateLimitedStreamFn,
-        getApiKey: () => isHf ? HF_API_KEY! : NIM_API_KEY!,
+        getApiKey: () => isLocal ? "no-key" : isHf ? HF_API_KEY! : NIM_API_KEY!,
       });
 
       agent.subscribe((event: AgentEvent) => {
@@ -646,9 +788,10 @@ async function runPiAgent(agentId: string, modelId: string, testConfig: TestConf
 // ── Run orchestration ──────────────────────────────────────
 
 async function launchAllModels(concurrency = 5, testConfig: TestConfig = ACTIVE_TEST_CONFIG, selectedDisplayIds?: string[]): Promise<string> {
-  const modelsToTest = selectedDisplayIds
+  const modelsToTest = (selectedDisplayIds
     ? TOOL_MODELS.filter(m => selectedDisplayIds.includes(m.displayId))
-    : TOOL_MODELS;
+    : TOOL_MODELS
+  ).filter(m => ACTIVE_PROVIDER === "all" || m.testProvider === ACTIVE_PROVIDER);
   const runId = Math.random().toString(36).slice(2, 6);
   runCounter++;
   const now = Date.now();
@@ -750,11 +893,22 @@ async function launchAllModels(concurrency = 5, testConfig: TestConfig = ACTIVE_
     const elapsed = Math.round((Date.now() - now) / 1000);
     console.log(`elapsed_sec:  ${elapsed}`);
 
-    // List which models passed/failed
+    // List which models passed/failed, with per-agent progress + timing.
     for (const [, a] of agents) {
       if (a.runId !== runId) continue;
       const s = a.status === "done" || a.status === "connected" ? "pass" : "fail";
-      console.log(`model_result: ${s} ${a.model}`);
+      const duration = a.finishedAt && a.startedAt ? `${Math.round((a.finishedAt - a.startedAt) / 1000)}s` : "?";
+      console.log(`model_result: ${s} progress=${a.progress ?? "none"} duration=${duration} ${a.model}`);
+    }
+
+    // Dump bridge records for woid-skills so we can post-mortem which
+    // calls each agent actually made (bridge records arrive in order).
+    const bridge = (global as any).__woidBridge;
+    if (bridge) {
+      console.log(`\nwoid_bridge_records: ${bridge.records.length}`);
+      for (const r of bridge.records) {
+        console.log(`  ${new Date(r.ts).toISOString()} kind=${r.kind} body=${JSON.stringify(r.body)}`);
+      }
     }
 
     if (AUTO_ALL) {
@@ -2430,8 +2584,18 @@ async function main() {
 
   const nimCount = TOOL_MODELS.filter(m => m.testProvider === "nim").length;
   const hfCount = TOOL_MODELS.filter(m => m.testProvider === "hf").length;
-  console.log(`  ${TOOL_MODELS.length} models loaded (${nimCount} NIM, ${hfCount} HF). Provider: ${ACTIVE_PROVIDER}`);
+  const localCount = TOOL_MODELS.filter(m => m.testProvider === "local").length;
+  console.log(`  ${TOOL_MODELS.length} models loaded (${nimCount} NIM, ${hfCount} HF, ${localCount} local). Provider: ${ACTIVE_PROVIDER}`);
   console.log(`  Test type: ${ACTIVE_TEST_CONFIG.name}`);
+
+  // The woid-skills test needs the fake bridge on localhost:4455 so the
+  // agents' curl calls have something to hit. Containers use --network host
+  // so localhost from inside the container is the host's localhost.
+  let woidBridge: WoidBridge | null = null;
+  if (ACTIVE_TEST_CONFIG.name === "woid-skills") {
+    woidBridge = await startWoidBridge(4455);
+    console.log(`  woid-bridge listening on http://localhost:${woidBridge.port}`);
+  }
 
   httpServer.listen(DASHBOARD_PORT, () => {
     console.log(`\n  Pi Agent Test Lab — http://localhost:${DASHBOARD_PORT}/\n`);
@@ -2440,6 +2604,12 @@ async function main() {
   if (AUTO_ALL) {
     console.log(`  Auto-launching all ${TOOL_MODELS.length} models (${ACTIVE_TEST_CONFIG.name})...`);
     await launchAllModels(5, ACTIVE_TEST_CONFIG);
+    // launchAllModels returns as soon as agents are queued, not when they
+    // finish. The run-complete handler (inside launchAllModels itself) is
+    // what dumps final stats + process.exit — by the time we get there
+    // via that path the bridge is still up because we don't close it here.
+    // Stash the bridge so the run-complete handler can read it.
+    (global as any).__woidBridge = woidBridge;
   }
 }
 

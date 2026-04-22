@@ -60,6 +60,24 @@ npx tsx src/run.ts
 
 Dashboard at http://localhost:3457
 
+### Local models (llama.cpp)
+
+Runs open-weights models through an OpenAI-compat llama.cpp server. One model
+in VRAM at a time; runs are serialized via a mutex so NIM/HF keep parallelism.
+
+```bash
+# 1. pick a model from src/local-models.json and launch llama-server:
+./scripts/swap-local-model.sh gemma-4-E4B-it-Q4_K_M
+
+# 2. point the runner at it + restrict the batch to local:
+export LOCAL_LLM_BASE_URL=http://localhost:18080/v1
+export LOCAL_LLM_MODEL=gemma-4-E4B-it-Q4_K_M
+npx tsx src/run.ts --provider=local --all
+```
+
+Swap models by re-running the script. For CUDA, edit `compose.llama-cpp.yml`
+to use `:server-cuda` and uncomment the GPU deploy block.
+
 ## Features
 
 - **Progress tracking** — milestones per agent, not just pass/fail
